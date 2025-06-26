@@ -1,0 +1,555 @@
+#main File 
+import tkinter as tk
+from tkinter import messagebox, scrolledtext, filedialog
+import threading
+from core import DocumentationGenerator
+
+class App(tk.Tk):
+    def __init__(self):
+        super().__init__()
+        self.title("GitLab AI Documentation Generator")
+        self.geometry("900x700")
+        self.resizable(True, True)
+        
+        self.doc_generator = DocumentationGenerator()
+        self.setup_ui()
+        
+    def setup_ui(self):
+        # Main frame
+        main_frame = tk.Frame(self, padx=20, pady=20)
+        main_frame.pack(fill=tk.BOTH, expand=True)
+        
+        # Title
+        title_label = tk.Label(main_frame, text="GitLab AI Documentation Generator", 
+                              font=("Arial", 16, "bold"))
+        title_label.pack(pady=(0, 20))
+        
+        # URL input section
+        url_frame = tk.Frame(main_frame)
+        url_frame.pack(fill=tk.X, pady=(0, 10))
+        
+        self.url_label = tk.Label(url_frame, text="GitLab Repository URL:", font=("Arial", 10))
+        self.url_label.pack(anchor=tk.W)
+        
+        self.url_entry = tk.Entry(url_frame, width=80, font=("Arial", 10))
+        self.url_entry.pack(fill=tk.X, pady=(5, 0))
+        
+        # Buttons frame
+        button_frame = tk.Frame(main_frame)
+        button_frame.pack(fill=tk.X, pady=10)
+        
+        self.generate_button = tk.Button(button_frame, text="Generate Documentation", 
+                                       command=self.start_generation, bg="#4CAF50", 
+                                       fg="white", font=("Arial", 10, "bold"))
+        self.generate_button.pack(side=tk.LEFT, padx=(0, 10))
+        
+        self.save_button = tk.Button(button_frame, text="Save Documentation", 
+                                   command=self.save_documentation, state=tk.DISABLED,
+                                   bg="#2196F3", fg="white", font=("Arial", 10))
+        self.save_button.pack(side=tk.LEFT)
+        
+        # Status section
+        self.status_label = tk.Label(main_frame, text="Status: Ready", 
+                                   font=("Arial", 10), fg="green")
+        self.status_label.pack(anchor=tk.W, pady=(10, 5))
+        
+        # Progress bar (simple text-based)
+        self.progress_label = tk.Label(main_frame, text="", font=("Arial", 9), fg="blue")
+        self.progress_label.pack(anchor=tk.W)
+        
+        # Documentation output
+        output_label = tk.Label(main_frame, text="Generated Documentation:", 
+                              font=("Arial", 10, "bold"))
+        output_label.pack(anchor=tk.W, pady=(20, 5))
+        
+        self.text_area = scrolledtext.ScrolledText(main_frame, wrap=tk.WORD, 
+                                                 font=("Consolas", 9), height=25)
+        self.text_area.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
+        
+    def start_generation(self):
+        repo_url = self.url_entry.get().strip()
+        if not repo_url:
+            messagebox.showerror("Error", "Please enter a GitLab repository URL.")
+            return
+            
+        self.generate_button.config(state=tk.DISABLED)
+        self.save_button.config(state=tk.DISABLED)
+        self.text_area.delete(1.0, tk.END)
+        
+        # Start generation in separate thread
+        thread = threading.Thread(target=self.generate_docs, args=(repo_url,))
+        thread.daemon = True
+        thread.start()
+        
+    def generate_docs(self, repo_url):
+        try:
+            def update_status(message):
+                self.after(0, lambda: self.status_label.config(text=f"Status: {message}"))
+                self.after(0, lambda: self.progress_label.config(text="● Processing..."))
+            
+            documentation = self.doc_generator.generate_documentation(repo_url, update_status)
+            
+            self.after(0, lambda: self.text_area.insert(tk.END, documentation))
+            self.after(0, lambda: self.status_label.config(text="Status: Documentation generated successfully!"))
+            self.after(0, lambda: self.progress_label.config(text="✓ Complete"))
+            self.after(0, lambda: self.save_button.config(state=tk.NORMAL))
+            
+        except Exception as e:
+            self.after(0, lambda: messagebox.showerror("Error", f"Failed to generate documentation: {str(e)}"))
+            self.after(0, lambda: self.status_label.config(text="Status: Error occurred"))
+            self.after(0, lambda: self.progress_label.config(text="✗ Failed"))
+        finally:
+            self.after(0, lambda: self.generate_button.config(state=tk.NORMAL))
+    
+    def save_documentation(self):
+        content = self.text_area.get(1.0, tk.END)
+        if not content.strip():
+            messagebox.showwarning("Warning", "No documentation to save.")
+            return
+            
+        file_path = filedialog.asksaveasfilename(
+            defaultextension=".md",
+            filetypes=[("Markdown files", "*.md"), ("Text files", "*.txt"), ("All files", "*.*")]
+        )
+        
+        if file_path:
+            try:
+                with open(file_path, 'w', encoding='utf-8') as f:
+                    f.write(content)
+                messagebox.showinfo("Success", f"Documentation saved to {file_path}")
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to save file: {str(e)}")
+
+if __name__ == '__main__':
+    app = App()
+    app.mainloop()
+
+#core.py
+
+import requests
+import base64
+import json
+from urllib.parse import urlparse
+from config import GITLAB_TOKEN, LLAMA_API_KEY
+
+class GitLabClient:
+    def __init__(self, token):
+        self.token = token
+        self.headers = {"PRIVATE-TOKEN": token}
+        
+    def get_project_info(self, repo_url):
+        """Extract project info from GitLab URL"""
+        try:
+            parsed = urlparse(repo_url)
+            gitlab_host = f"{parsed.scheme}://{parsed.netloc}"
+            project_path = parsed.path.strip('/').replace('.git', '')
+            
+            # Get project ID
+            api_url = f"{gitlab_host}/api/v4/projects/{requests.utils.quote(project_path, safe='')}"
+            response = requests.get(api_url, headers=self.headers)
+            response.raise_for_status()
+            
+            return response.json(), gitlab_host
+        except Exception as e:
+            raise Exception(f"Failed to fetch project info: {str(e)}")
+    
+    def get_repository_tree(self, gitlab_host, project_id):
+        """Get repository file tree"""
+        try:
+            api_url = f"{gitlab_host}/api/v4/projects/{project_id}/repository/tree"
+            params = {"recursive": True, "per_page": 100}
+            
+            all_files = []
+            page = 1
+            
+            while True:
+                params["page"] = page
+                response = requests.get(api_url, headers=self.headers, params=params)
+                response.raise_for_status()
+                
+                files = response.json()
+                if not files:
+                    break
+                    
+                all_files.extend([f for f in files if f['type'] == 'blob'])
+                page += 1
+                
+                if len(files) < 100:  # Last page
+                    break
+            
+            return all_files
+        except Exception as e:
+            raise Exception(f"Failed to fetch repository tree: {str(e)}")
+    
+    def get_file_content(self, gitlab_host, project_id, file_path):
+        """Get content of a specific file"""
+        try:
+            api_url = f"{gitlab_host}/api/v4/projects/{project_id}/repository/files/{requests.utils.quote(file_path, safe='')}"
+            params = {"ref": "main"}
+            
+            response = requests.get(api_url, headers=self.headers, params=params)
+            if response.status_code == 404:
+                # Try with master branch
+                params["ref"] = "master"
+                response = requests.get(api_url, headers=self.headers, params=params)
+            
+            response.raise_for_status()
+            file_data = response.json()
+            
+            # Decode base64 content
+            content = base64.b64decode(file_data['content']).decode('utf-8')
+            return content
+        except Exception as e:
+            return f"Error reading file {file_path}: {str(e)}"
+
+class CodeProcessor:
+    def __init__(self):
+        self.supported_extensions = ['.py', '.js', '.java', '.cpp', '.c', '.h', '.md', '.txt', '.yml', '.yaml', '.json', '.xml', '.html', '.css']
+    
+    def filter_files(self, files):
+        """Filter files by supported extensions"""
+        filtered = []
+        for file_info in files:
+            file_path = file_info['path']
+            if any(file_path.endswith(ext) for ext in self.supported_extensions):
+                if not self._should_skip_file(file_path):
+                    filtered.append(file_info)
+        return filtered
+    
+    def _should_skip_file(self, file_path):
+        """Skip certain files/directories"""
+        skip_patterns = [
+            'node_modules/', '.git/', '__pycache__/', '.venv/', 'venv/',
+            '.idea/', '.vscode/', 'dist/', 'build/', 'target/'
+        ]
+        return any(pattern in file_path for pattern in skip_patterns)
+    
+    def chunk_content(self, files_content, max_chunk_size=4000):
+        """Split content into chunks for LLaMA processing"""
+        chunks = []
+        current_chunk = ""
+        current_files = []
+        
+        for file_path, content in files_content.items():
+            file_section = f"\n\n=== FILE: {file_path} ===\n{content}\n"
+            
+            if len(current_chunk + file_section) > max_chunk_size:
+                if current_chunk:
+                    chunks.append({
+                        'content': current_chunk,
+                        'files': current_files.copy()
+                    })
+                current_chunk = file_section
+                current_files = [file_path]
+            else:
+                current_chunk += file_section
+                current_files.append(file_path)
+        
+        if current_chunk:
+            chunks.append({
+                'content': current_chunk,
+                'files': current_files
+            })
+        
+        return chunks
+
+class LlamaClient:
+    def __init__(self, api_key):
+        self.api_key = api_key
+        self.base_url = "https://api.groq.com/openai/v1/chat/completions"
+    
+    def generate_documentation(self, code_chunk, project_name=""):
+        """Generate documentation for code chunk using LLaMA"""
+        prompt = f"""You are an expert technical documentation generator. Analyze the provided code and generate comprehensive documentation.
+
+Project: {project_name}
+Files included: {', '.join(code_chunk['files'])}
+
+Code Content:
+{code_chunk['content']}
+
+Generate detailed documentation that includes:
+1. **Overview**: Brief description of what these files do
+2. **Key Components**: Main classes, functions, and their purposes  
+3. **Dependencies**: External libraries and frameworks used
+4. **Code Structure**: How the code is organized
+5. **Technical Details**: Important implementation details
+
+Format the response in clear markdown with proper headers and code examples where relevant."""
+
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json"
+        }
+        
+        payload = {
+            "model": "llama3-8b-8192",
+            "messages": [
+                {"role": "user", "content": prompt}
+            ],
+            "max_tokens": 2000,
+            "temperature": 0.3
+        }
+        
+        try:
+            response = requests.post(self.base_url, headers=headers, json=payload)
+            response.raise_for_status()
+            
+            result = response.json()
+            return result["choices"][0]["message"]["content"]
+        except Exception as e:
+            return f"Error generating documentation: {str(e)}"
+    
+    def generate_project_overview(self, project_info, all_files):
+        """Generate overall project documentation"""
+        files_list = "\n".join([f"- {f}" for f in all_files[:20]])  # Limit to first 20 files
+        if len(all_files) > 20:
+            files_list += f"\n... and {len(all_files) - 20} more files"
+        
+        prompt = f"""Generate a comprehensive project README for this GitLab repository:
+
+Project Name: {project_info.get('name', 'Unknown')}
+Description: {project_info.get('description', 'No description provided')}
+Language: {project_info.get('default_branch', 'main')}
+
+Files in repository:
+{files_list}
+
+Create a professional README that includes:
+1. **Project Title and Description**
+2. **Architecture Overview** 
+3. **Technology Stack**
+4. **Installation Instructions**
+5. **Usage Guide**
+6. **File Structure Explanation**
+7. **Contributing Guidelines**
+
+Make it comprehensive and suitable for both developers and stakeholders."""
+
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json"
+        }
+        
+        payload = {
+            "model": "llama3-8b-8192",
+            "messages": [
+                {"role": "user", "content": prompt}
+            ],
+            "max_tokens": 3000,
+            "temperature": 0.2
+        }
+        
+        try:
+            response = requests.post(self.base_url, headers=headers, json=payload)
+            response.raise_for_status()
+            
+            result = response.json()
+            return result["choices"][0]["message"]["content"]
+        except Exception as e:
+            return f"Error generating project overview: {str(e)}"
+
+class DocumentationGenerator:
+    def __init__(self):
+        self.gitlab_client = GitLabClient(GITLAB_TOKEN)
+        self.code_processor = CodeProcessor()
+        self.llama_client = LlamaClient(LLAMA_API_KEY)
+    
+    def generate_documentation(self, repo_url, status_callback=None):
+        """Main function to generate complete documentation"""
+        try:
+            # Step 1: Get project info
+            if status_callback:
+                status_callback("Connecting to GitLab...")
+            project_info, gitlab_host = self.gitlab_client.get_project_info(repo_url)
+            project_id = project_info['id']
+            
+            # Step 2: Get repository files
+            if status_callback:
+                status_callback("Fetching repository structure...")
+            all_files = self.gitlab_client.get_repository_tree(gitlab_host, project_id)
+            
+            # Step 3: Filter and process files
+            if status_callback:
+                status_callback("Processing code files...")
+            filtered_files = self.code_processor.filter_files(all_files)
+            
+            # Step 4: Get file contents
+            if status_callback:
+                status_callback("Reading file contents...")
+            files_content = {}
+            for i, file_info in enumerate(filtered_files[:15]):  # Limit to 15 files for demo
+                if status_callback:
+                    status_callback(f"Reading file {i+1}/{min(15, len(filtered_files))}: {file_info['path']}")
+                content = self.gitlab_client.get_file_content(gitlab_host, project_id, file_info['path'])
+                if not content.startswith("Error reading"):
+                    files_content[file_info['path']] = content
+            
+            # Step 5: Generate project overview
+            if status_callback:
+                status_callback("Generating project overview...")
+            project_overview = self.llama_client.generate_project_overview(
+                project_info, list(files_content.keys())
+            )
+            
+            # Step 6: Process code chunks
+            if status_callback:
+                status_callback("Processing code for AI analysis...")
+            chunks = self.code_processor.chunk_content(files_content)
+            
+            # Step 7: Generate documentation for each chunk
+            documentation_parts = [project_overview]
+            
+            for i, chunk in enumerate(chunks):
+                if status_callback:
+                    status_callback(f"Generating documentation for chunk {i+1}/{len(chunks)}...")
+                chunk_doc = self.llama_client.generate_documentation(chunk, project_info.get('name', ''))
+                documentation_parts.append(f"\n\n## Code Analysis - Part {i+1}\n\n{chunk_doc}")
+            
+            # Step 8: Combine all documentation
+            if status_callback:
+                status_callback("Finalizing documentation...")
+            
+            final_documentation = "\n\n".join(documentation_parts)
+            
+            # Add metadata footer
+            final_documentation += f"\n\n---\n*Documentation generated automatically from GitLab repository: {repo_url}*"
+            
+            return final_documentation
+            
+        except Exception as e:
+            raise Exception(f"Documentation generation failed: {str(e)}")
+#config.py
+
+import os
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
+
+# GitLab Configuration
+GITLAB_TOKEN = os.getenv("GITLAB_TOKEN")
+if not GITLAB_TOKEN:
+    raise ValueError("GITLAB_TOKEN not found in environment variables. Please add it to your .env file.")
+
+# LLaMA API Configuration  
+LLAMA_API_KEY = os.getenv("LLAMA_API_KEY")
+if not LLAMA_API_KEY:
+    raise ValueError("LLAMA_API_KEY not found in environment variables. Please add it to your .env file.")
+
+# Azure Configuration (Optional - for future use)
+AZURE_STORAGE_CONNECTION_STRING = os.getenv("AZURE_STORAGE_CONNECTION_STRING")
+AZURE_COSMOS_CONNECTION_STRING = os.getenv("AZURE_COSMOS_CONNECTION_STRING")
+
+# Application Settings
+MAX_FILES_TO_PROCESS = 15  # Limit number of files to process
+MAX_CHUNK_SIZE = 4000      # Maximum characters per chunk for LLaMA
+
+#azure storage 
+
+import os
+from datetime import datetime
+from config import AZURE_STORAGE_CONNECTION_STRING, AZURE_COSMOS_CONNECTION_STRING
+
+# Placeholder for future Azure integration
+# Uncomment and implement when you're ready to add Azure functionality
+
+class AzureStorageManager:
+    def __init__(self):
+        self.storage_connection_string = AZURE_STORAGE_CONNECTION_STRING
+        self.cosmos_connection_string = AZURE_COSMOS_CONNECTION_STRING
+        
+    def upload_document_to_blob(self, document_content, filename, container_name="documentation"):
+        """
+        Upload generated documentation to Azure Blob Storage
+        """
+        # TODO: Implement Azure Blob Storage upload
+        # from azure.storage.blob import BlobServiceClient
+        
+        try:
+            # blob_service_client = BlobServiceClient.from_connection_string(self.storage_connection_string)
+            # blob_client = blob_service_client.get_blob_client(container=container_name, blob=filename)
+            # blob_client.upload_blob(document_content, overwrite=True)
+            print(f"Would upload {filename} to Azure Blob Storage")
+            return f"https://yourstorageaccount.blob.core.windows.net/{container_name}/{filename}"
+        except Exception as e:
+            raise Exception(f"Failed to upload to Azure Blob Storage: {str(e)}")
+    
+    def save_metadata_to_cosmos(self, metadata):
+        """
+        Save document metadata to Azure Cosmos DB
+        """
+        # TODO: Implement Azure Cosmos DB integration
+        # from azure.cosmos import CosmosClient
+        
+        try:
+            # cosmos_client = CosmosClient.from_connection_string(self.cosmos_connection_string)
+            # database = cosmos_client.get_database_client("DocumentationDB")
+            # container = database.get_container_client("DocumentMetadata")
+            # container.create_item(metadata)
+            print(f"Would save metadata to Cosmos DB: {metadata}")
+            return True
+        except Exception as e:
+            raise Exception(f"Failed to save metadata to Cosmos DB: {str(e)}")
+    
+    def get_document_history(self, repo_url):
+        """
+        Retrieve document generation history for a repository
+        """
+        # TODO: Implement retrieval from Cosmos DB
+        return []
+    
+    def store_documentation(self, repo_url, documentation_content, project_name):
+        """
+        Complete storage workflow: upload to blob and save metadata
+        """
+        try:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"{project_name}_{timestamp}.md"
+            
+            # Upload to blob storage
+            blob_url = self.upload_document_to_blob(documentation_content, filename)
+            
+            # Save metadata
+            metadata = {
+                "id": f"{project_name}_{timestamp}",
+                "repo_url": repo_url,
+                "project_name": project_name,
+                "filename": filename,
+                "blob_url": blob_url,
+                "created_at": datetime.now().isoformat(),
+                "document_type": "auto_generated",
+                "file_size": len(documentation_content)
+            }
+            
+            self.save_metadata_to_cosmos(metadata)
+            
+            return {
+                "success": True,
+                "blob_url": blob_url,
+                "metadata": metadata
+            }
+            
+        except Exception as e:
+            return {
+                "success": False,
+                "error": str(e)
+            }
+
+# Example usage (for future implementation)
+def store_generated_documentation(repo_url, documentation, project_name):
+    """
+    Helper function to store documentation in Azure
+    """
+    if AZURE_STORAGE_CONNECTION_STRING and AZURE_COSMOS_CONNECTION_STRING:
+        storage_manager = AzureStorageManager()
+        result = storage_manager.store_documentation(repo_url, documentation, project_name)
+        return result
+    else:
+        print("Azure credentials not configured. Skipping cloud storage.")
+        return {"success": False, "error": "Azure not configured"}
+
+#requirements.txt
+python-dotenv==1.0.0
+requests==2.31.0
+urllib3==2.0.4
