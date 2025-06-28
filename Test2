@@ -1,5 +1,3 @@
-#core.py
-
 # core.py - Updated with proper model name and error handling
 
 import requests
