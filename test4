@@ -1,0 +1,556 @@
+# core.py - Modified for UBS Internal AI API
+
+import requests
+import base64
+import json
+import urllib3
+from urllib.parse import urlparse
+from config import GITLAB_TOKEN, LLAMA_API_KEY
+
+# Disable SSL warnings if we're going to disable verification
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+class GitLabClient:
+    def __init__(self, token, verify_ssl=False):  # Default to False for self-signed certs
+        self.token = token
+        self.headers = {"PRIVATE-TOKEN": token}
+        self.verify_ssl = verify_ssl
+        
+        # Configure session for better SSL handling
+        self.session = requests.Session()
+        self.session.headers.update(self.headers)
+        self.session.verify = verify_ssl
+        
+        # Add timeout and retry logic
+        from requests.adapters import HTTPAdapter
+        from urllib3.util.retry import Retry
+        
+        retry_strategy = Retry(
+            total=3,
+            backoff_factor=1,
+            status_forcelist=[429, 500, 502, 503, 504],
+        )
+        adapter = HTTPAdapter(max_retries=retry_strategy)
+        self.session.mount("http://", adapter)
+        self.session.mount("https://", adapter)
+        
+    def get_project_info(self, repo_url):
+        """Extract project info from GitLab URL"""
+        try:
+            parsed = urlparse(repo_url)
+            gitlab_host = f"{parsed.scheme}://{parsed.netloc}"
+            project_path = parsed.path.strip('/').replace('.git', '')
+            
+            # Get project ID - try different URL encoding approaches
+            encoded_path = requests.utils.quote(project_path, safe='')
+            api_url = f"{gitlab_host}/api/v4/projects/{encoded_path}"
+            
+            print(f"Connecting to: {api_url}")  # Debug info
+            print(f"SSL Verification: {self.verify_ssl}")
+            
+            response = self.session.get(api_url, timeout=30)
+            response.raise_for_status()
+            return response.json(), gitlab_host
+            
+        except requests.exceptions.SSLError as e:
+            print(f"SSL Error: {e}")
+            print("Retrying with SSL verification disabled...")
+            self.session.verify = False
+            try:
+                response = self.session.get(api_url, timeout=30)
+                response.raise_for_status()
+                return response.json(), gitlab_host
+            except Exception as retry_e:
+                raise Exception(f"Failed to fetch project info even without SSL verification: {str(retry_e)}")
+        except requests.exceptions.ConnectionError as e:
+            raise Exception(f"Connection error - check your network and GitLab URL: {str(e)}")
+        except requests.exceptions.Timeout as e:
+            raise Exception(f"Request timeout - GitLab server may be slow: {str(e)}")
+        except requests.exceptions.HTTPError as e:
+            if response.status_code == 401:
+                raise Exception("Authentication failed - check your GitLab token")
+            elif response.status_code == 404:
+                raise Exception("Repository not found - check the URL and access permissions")
+            else:
+                raise Exception(f"HTTP {response.status_code}: {response.reason}")
+        except Exception as e:
+            raise Exception(f"Failed to fetch project info: {str(e)}")
+    
+    def get_repository_tree(self, gitlab_host, project_id):
+        """Get repository file tree"""
+        try:
+            api_url = f"{gitlab_host}/api/v4/projects/{project_id}/repository/tree"
+            params = {"recursive": True, "per_page": 100}
+            
+            all_files = []
+            page = 1
+            
+            while True:
+                params["page"] = page
+                response = self.session.get(api_url, params=params, timeout=30)
+                response.raise_for_status()
+                
+                files = response.json()
+                if not files:
+                    break
+                    
+                all_files.extend([f for f in files if f['type'] == 'blob'])
+                page += 1
+                
+                if len(files) < 100:  # Last page
+                    break
+                    
+                # Safety limit to prevent infinite loops
+                if page > 50:
+                    print("Warning: Stopped at page 50 to prevent excessive requests")
+                    break
+            
+            return all_files
+            
+        except Exception as e:
+            raise Exception(f"Failed to fetch repository tree: {str(e)}")
+    
+    def get_file_content(self, gitlab_host, project_id, file_path):
+        """Get content of a specific file"""
+        try:
+            encoded_path = requests.utils.quote(file_path, safe='')
+            api_url = f"{gitlab_host}/api/v4/projects/{project_id}/repository/files/{encoded_path}"
+            
+            # Try main branch first, then master
+            for branch in ["main", "master", "develop"]:
+                params = {"ref": branch}
+                response = self.session.get(api_url, params=params, timeout=30)
+                
+                if response.status_code == 200:
+                    file_data = response.json()
+                    # Decode base64 content
+                    try:
+                        content = base64.b64decode(file_data['content']).decode('utf-8')
+                        return content
+                    except UnicodeDecodeError:
+                        # Try with different encoding for binary files
+                        try:
+                            content = base64.b64decode(file_data['content']).decode('latin1')
+                            return f"[Binary file content - {len(content)} bytes]"
+                        except:
+                            return f"[Unable to decode file content]"
+                elif response.status_code != 404:
+                    response.raise_for_status()
+            
+            return f"File not found in any branch: {file_path}"
+            
+        except Exception as e:
+            return f"Error reading file {file_path}: {str(e)}"
+
+class CodeProcessor:
+    def __init__(self):
+        self.supported_extensions = ['.py', '.js', '.java', '.cpp', '.c', '.h', '.md', '.txt', '.yml', '.yaml', '.json', '.xml', '.html', '.css', '.rb', '.go', '.rs', '.php', '.ts', '.jsx', '.tsx']
+    
+    def filter_files(self, files):
+        """Filter files by supported extensions"""
+        filtered = []
+        for file_info in files:
+            file_path = file_info['path']
+            if any(file_path.endswith(ext) for ext in self.supported_extensions):
+                if not self._should_skip_file(file_path):
+                    filtered.append(file_info)
+        return filtered
+    
+    def _should_skip_file(self, file_path):
+        """Skip certain files/directories"""
+        skip_patterns = [
+            'node_modules/', '.git/', '__pycache__/', '.venv/', 'venv/',
+            '.idea/', '.vscode/', 'dist/', 'build/', 'target/', 'vendor/',
+            '.next/', '.nuxt/', 'coverage/', '.nyc_output/'
+        ]
+        return any(pattern in file_path for pattern in skip_patterns)
+    
+    def chunk_content(self, files_content, max_chunk_size=4000):
+        """Split content into chunks for LLaMA processing"""
+        chunks = []
+        current_chunk = ""
+        current_files = []
+        
+        for file_path, content in files_content.items():
+            file_section = f"\n\n=== FILE: {file_path} ===\n{content}\n"
+            
+            if len(current_chunk + file_section) > max_chunk_size:
+                if current_chunk:
+                    chunks.append({
+                        'content': current_chunk,
+                        'files': current_files.copy()
+                    })
+                current_chunk = file_section
+                current_files = [file_path]
+            else:
+                current_chunk += file_section
+                current_files.append(file_path)
+        
+        if current_chunk:
+            chunks.append({
+                'content': current_chunk,
+                'files': current_files
+            })
+        
+        return chunks
+
+class LlamaClient:
+    def __init__(self, api_key):
+        self.api_key = api_key
+        
+        # UBS Internal AI API Configuration
+        # NOTE: You need to get the correct API endpoint from your IT department
+        self.base_url = "https://chat.copdev.azpriv-cloud.ubs.net/api/v1/chat/completions"
+        
+        # Alternative possible endpoints - ask your IT team which one is correct:
+        # self.base_url = "https://chat.copdev.azpriv-cloud.ubs.net/v1/chat/completions"
+        # self.base_url = "https://api.copdev.azpriv-cloud.ubs.net/v1/chat/completions"
+        
+        print("Testing UBS Internal AI API connection...")
+        self._test_api_connection()
+        
+        # UBS Available Models
+        self.available_models = [
+            "llama-4-scout-instruct",
+            "llama-3.3-70b-instruct"
+        ]
+        print(f"Available UBS models: {self.available_models}")
+    
+    def _test_api_connection(self):
+        """Test basic API connectivity"""
+        try:
+            headers = {
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json",
+                # You might need additional headers for UBS authentication
+                # "X-UBS-User": "your_username",  # Uncomment if needed
+                # "X-UBS-App": "documentation-generator",  # Uncomment if needed
+            }
+            
+            # Test endpoint - you may need to adjust this URL
+            test_url = "https://chat.copdev.azpriv-cloud.ubs.net/api/v1/models"
+            # Alternative test URLs - try these if the above doesn't work:
+            # test_url = "https://chat.copdev.azpriv-cloud.ubs.net/v1/models"
+            # test_url = "https://api.copdev.azpriv-cloud.ubs.net/v1/models"
+            
+            print(f"Testing connection to: {test_url}")
+            
+            response = requests.get(test_url, headers=headers, timeout=10, verify=False)  # Added verify=False for internal certs
+            print(f"API test response status: {response.status_code}")
+            
+            if response.status_code == 401:
+                raise Exception("Invalid API key - check your UBS API credentials")
+            elif response.status_code == 403:
+                raise Exception("API access forbidden - check your UBS account permissions")
+            elif response.status_code == 404:
+                print("Models endpoint not found - this might be normal, trying chat endpoint...")
+                # Try a simple chat test instead
+                return self._test_chat_endpoint(headers)
+            elif response.status_code != 200:
+                print(f"API test warning - status {response.status_code}: {response.text}")
+                print("Proceeding anyway - the models endpoint might not be available")
+            else:
+                print("✓ UBS Internal AI API connection successful")
+            
+        except requests.exceptions.ConnectionError as e:
+            raise Exception(f"Cannot connect to UBS Internal AI API - check your network connection and VPN: {str(e)}")
+        except requests.exceptions.Timeout as e:
+            raise Exception(f"UBS API connection timeout: {str(e)}")
+        except Exception as e:
+            print(f"UBS API test warning: {str(e)}")
+            print("Proceeding anyway - the API might still work for chat requests")
+    
+    def _test_chat_endpoint(self, headers):
+        """Test the chat endpoint with a simple request"""
+        try:
+            test_payload = {
+                "model": "llama-4-scout-instruct",
+                "messages": [
+                    {"role": "user", "content": "Hello, this is a test."}
+                ],
+                "max_tokens": 10
+            }
+            
+            response = requests.post(self.base_url, headers=headers, json=test_payload, timeout=30, verify=False)
+            
+            if response.status_code == 200:
+                print("✓ UBS Internal AI API chat endpoint working")
+                return True
+            else:
+                print(f"Chat endpoint test failed: {response.status_code} - {response.text}")
+                return False
+                
+        except Exception as e:
+            print(f"Chat endpoint test error: {str(e)}")
+            return False
+    
+    def _select_best_model(self):
+        """Select the best available model"""
+        # Use llama-4-scout-instruct as primary choice
+        preferred_models = [
+            "llama-4-scout-instruct",
+            "llama-3.3-70b-instruct"
+        ]
+        
+        for model in preferred_models:
+            if model in self.available_models:
+                print(f"✓ Selected model: {model}")
+                return model
+        
+        # Fallback to first available
+        if self.available_models:
+            model = self.available_models[0]
+            print(f"Using first available model: {model}")
+            return model
+        
+        return "llama-4-scout-instruct"  # Default fallback
+    
+    def generate_documentation(self, code_chunk, project_name=""):
+        """Generate documentation for code chunk using UBS LLaMA"""
+        model = self._select_best_model()
+        
+        prompt = f"""You are an expert technical documentation generator. Analyze the provided code and generate comprehensive documentation.
+
+Project: {project_name}
+Files included: {', '.join(code_chunk['files'])}
+
+Code Content:
+{code_chunk['content']}
+
+Generate detailed documentation that includes:
+1. **Overview**: Brief description of what these files do
+2. **Key Components**: Main classes, functions, and their purposes  
+3. **Dependencies**: External libraries and frameworks used
+4. **Code Structure**: How the code is organized
+5. **Technical Details**: Important implementation details
+
+Format the response in clear markdown with proper headers and code examples where relevant."""
+
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+            # Add any additional UBS-specific headers here
+            # "X-UBS-User": "your_username",  # Uncomment if needed
+            # "X-UBS-App": "documentation-generator",  # Uncomment if needed
+        }
+        
+        payload = {
+            "model": model,
+            "messages": [
+                {"role": "user", "content": prompt}
+            ],
+            "max_tokens": 2000,
+            "temperature": 0.3
+        }
+        
+        try:
+            print(f"Making API request to {self.base_url} with model {model}")
+            response = requests.post(self.base_url, headers=headers, json=payload, timeout=60, verify=False)
+            
+            print(f"Response status: {response.status_code}")
+            if response.status_code != 200:
+                print(f"Response headers: {dict(response.headers)}")
+                print(f"Response text: {response.text}")
+            
+            response.raise_for_status()
+            
+            result = response.json()
+            
+            # Handle different response formats
+            if "choices" in result and len(result["choices"]) > 0:
+                return result["choices"][0]["message"]["content"]
+            elif "response" in result:
+                return result["response"]
+            elif "content" in result:
+                return result["content"]
+            else:
+                return f"Unexpected response format: {result}"
+            
+        except requests.exceptions.HTTPError as e:
+            if response.status_code == 401:
+                return f"Authentication Error: Invalid API key. Please check your UBS API credentials."
+            elif response.status_code == 429:
+                return f"Rate Limit Error: Too many requests. Please try again later."
+            elif response.status_code == 400:
+                error_details = ""
+                try:
+                    error_json = response.json()
+                    error_details = f": {error_json.get('error', {}).get('message', response.text)}"
+                except:
+                    error_details = f": {response.text}"
+                return f"Bad Request{error_details}. The model '{model}' might not be available or the request format is incorrect."
+            else:
+                return f"HTTP Error {response.status_code}: {response.text}"
+        except requests.exceptions.ConnectionError as e:
+            return f"Connection Error: Unable to connect to UBS Internal AI API. Check your network connection and VPN. Details: {str(e)}"
+        except requests.exceptions.Timeout as e:
+            return f"Timeout Error: Request took too long. Try again."
+        except Exception as e:
+            return f"Error generating documentation: {str(e)}"
+    
+    def generate_project_overview(self, project_info, all_files):
+        """Generate overall project documentation"""
+        model = self._select_best_model()
+        
+        files_list = "\n".join([f"- {f}" for f in all_files[:20]])  # Limit to first 20 files
+        if len(all_files) > 20:
+            files_list += f"\n... and {len(all_files) - 20} more files"
+        
+        prompt = f"""Generate a comprehensive project README for this GitLab repository:
+
+Project Name: {project_info.get('name', 'Unknown')}
+Description: {project_info.get('description', 'No description provided')}
+Default Branch: {project_info.get('default_branch', 'main')}
+
+Files in repository:
+{files_list}
+
+Create a professional README that includes:
+1. **Project Title and Description**
+2. **Architecture Overview** 
+3. **Technology Stack**
+4. **Installation Instructions**
+5. **Usage Guide**
+6. **File Structure Explanation**
+7. **Contributing Guidelines**
+
+Make it comprehensive and suitable for both developers and stakeholders."""
+
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+            # Add any additional UBS-specific headers here
+            # "X-UBS-User": "your_username",  # Uncomment if needed
+            # "X-UBS-App": "documentation-generator",  # Uncomment if needed
+        }
+        
+        payload = {
+            "model": model,
+            "messages": [
+                {"role": "user", "content": prompt}
+            ],
+            "max_tokens": 3000,
+            "temperature": 0.2
+        }
+        
+        try:
+            print(f"Making project overview API request with model {model}")
+            response = requests.post(self.base_url, headers=headers, json=payload, timeout=60, verify=False)
+            
+            print(f"Project overview response status: {response.status_code}")
+            if response.status_code != 200:
+                print(f"Project overview response text: {response.text}")
+            
+            response.raise_for_status()
+            
+            result = response.json()
+            
+            # Handle different response formats
+            if "choices" in result and len(result["choices"]) > 0:
+                return result["choices"][0]["message"]["content"]
+            elif "response" in result:
+                return result["response"]
+            elif "content" in result:
+                return result["content"]
+            else:
+                return f"Unexpected response format: {result}"
+            
+        except Exception as e:
+            return f"Error generating project overview: {str(e)}"
+
+class DocumentationGenerator:
+    def __init__(self, verify_ssl=False):  # Default to False for self-signed certs
+        self.gitlab_client = GitLabClient(GITLAB_TOKEN, verify_ssl=verify_ssl)
+        self.code_processor = CodeProcessor()
+        self.llama_client = LlamaClient(LLAMA_API_KEY)
+    
+    def generate_documentation(self, repo_url, status_callback=None):
+        """Main function to generate complete documentation"""
+        try:
+            # Step 1: Get project info
+            if status_callback:
+                status_callback("Connecting to GitLab...")
+            project_info, gitlab_host = self.gitlab_client.get_project_info(repo_url)
+            project_id = project_info['id']
+            
+            # Step 2: Get repository files
+            if status_callback:
+                status_callback("Fetching repository structure...")
+            all_files = self.gitlab_client.get_repository_tree(gitlab_host, project_id)
+            
+            # Step 3: Filter and process files
+            if status_callback:
+                status_callback("Processing code files...")
+            filtered_files = self.code_processor.filter_files(all_files)
+            
+            # Step 4: Get file contents
+            if status_callback:
+                status_callback("Reading file contents...")
+            files_content = {}
+            max_files = min(15, len(filtered_files))  # Limit to 15 files for demo
+            
+            for i, file_info in enumerate(filtered_files[:max_files]):
+                if status_callback:
+                    status_callback(f"Reading file {i+1}/{max_files}: {file_info['path']}")
+                content = self.gitlab_client.get_file_content(gitlab_host, project_id, file_info['path'])
+                if not content.startswith("Error reading") and not content.startswith("File not found"):
+                    files_content[file_info['path']] = content
+            
+            if not files_content:
+                raise Exception("No readable files found in the repository")
+            
+            # Step 5: Generate project overview
+            if status_callback:
+                status_callback("Generating project overview...")
+            project_overview = self.llama_client.generate_project_overview(
+                project_info, list(files_content.keys())
+            )
+            
+            # Step 6: Process code chunks
+            if status_callback:
+                status_callback("Processing code for AI analysis...")
+            chunks = self.code_processor.chunk_content(files_content)
+            
+            # Step 7: Generate documentation for each chunk
+            documentation_parts = [project_overview]
+            
+            for i, chunk in enumerate(chunks):
+                if status_callback:
+                    status_callback(f"Generating documentation for chunk {i+1}/{len(chunks)}...")
+                chunk_doc = self.llama_client.generate_documentation(chunk, project_info.get('name', ''))
+                documentation_parts.append(f"\n\n## Code Analysis - Part {i+1}\n\n{chunk_doc}")
+            
+            # Step 8: Combine all documentation
+            if status_callback:
+                status_callback("Finalizing documentation...")
+            
+            final_documentation = "\n\n".join(documentation_parts)
+            
+            # Add metadata footer
+            final_documentation += f"\n\n---\n*Documentation generated automatically from GitLab repository: {repo_url}*"
+            final_documentation += f"\n*Files processed: {len(files_content)}*"
+            final_documentation += f"\n*Generated on: {project_info.get('last_activity_at', 'Unknown')}*"
+            
+            return final_documentation
+            
+        except Exception as e:
+            raise Exception(f"Documentation generation failed: {str(e)}")
+
+# Additional configuration notes for UBS deployment:
+"""
+IMPORTANT: Configure these settings in your config.py or environment variables:
+
+1. GITLAB_TOKEN: Your GitLab personal access token
+2. LLAMA_API_KEY: Your UBS Internal AI API key/token
+
+You may also need to configure:
+- VPN connection to access UBS internal services
+- Additional authentication headers
+- Proxy settings if required by UBS network
+
+Contact your IT department for:
+- Correct API endpoint URL
+- Authentication method and credentials
+- Required headers or certificates
+- Network/proxy configuration
+"""
