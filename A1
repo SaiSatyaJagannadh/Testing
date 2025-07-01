@@ -1,0 +1,378 @@
+class LlamaClient:
+    def __init__(self, api_key):
+        self.api_key = api_key
+        
+        # Open WebUI typically uses OpenAI-compatible endpoints
+        # Try the most common Open WebUI endpoint formats
+        self.possible_endpoints = [
+            "https://chat.copdev.azpriv-cloud.ubs.net/v1/chat/completions",  # Most common
+            "https://chat.copdev.azpriv-cloud.ubs.net/api/v1/chat/completions",
+            "https://chat.copdev.azpriv-cloud.ubs.net/openai/v1/chat/completions",
+            "https://chat.copdev.azpriv-cloud.ubs.net/api/chat/completions",
+        ]
+        
+        # Find working endpoint
+        self.base_url = self._find_working_endpoint()
+        
+        # Available models
+        self.available_models = [
+            "llama-4-scout-instruct",
+            "llama-3.3-70b-instruct"
+        ]
+        
+        print(f"✓ Using endpoint: {self.base_url}")
+        print(f"Available models: {self.available_models}")
+    
+    def _find_working_endpoint(self):
+        """Test different endpoints to find the working one"""
+        
+        # Different auth header formats to try
+        auth_headers = [
+            {"Authorization": f"Bearer {self.api_key}"},
+            {"Authorization": f"Token {self.api_key}"},
+            {"X-API-Key": self.api_key},
+            {"api-key": self.api_key},
+        ]
+        
+        test_payload = {
+            "model": "llama-4-scout-instruct",
+            "messages": [{"role": "user", "content": "test"}],
+            "max_tokens": 5,
+            "stream": False
+        }
+        
+        for endpoint in self.possible_endpoints:
+            for auth_header in auth_headers:
+                try:
+                    headers = {
+                        "Content-Type": "application/json",
+                        **auth_header
+                    }
+                    
+                    print(f"Testing endpoint: {endpoint}")
+                    print(f"Testing auth format: {list(auth_header.keys())[0]}")
+                    
+                    response = requests.post(
+                        endpoint, 
+                        headers=headers, 
+                        json=test_payload, 
+                        timeout=10,
+                        verify=False  # For internal certs
+                    )
+                    
+                    print(f"Response status: {response.status_code}")
+                    
+                    if response.status_code == 200:
+                        print(f"✓ Found working endpoint: {endpoint}")
+                        self.working_headers = headers
+                        return endpoint
+                    elif response.status_code == 401:
+                        print("Authentication failed with this format")
+                        continue
+                    elif response.status_code == 404:
+                        print("Endpoint not found")
+                        continue
+                    elif response.status_code == 405:
+                        print("Method not allowed - trying next endpoint")
+                        break  # Try next endpoint
+                    else:
+                        print(f"Unexpected status: {response.status_code} - {response.text}")
+                        
+                except requests.exceptions.ConnectionError:
+                    print(f"Connection failed to {endpoint}")
+                    continue
+                except Exception as e:
+                    print(f"Error testing {endpoint}: {str(e)}")
+                    continue
+        
+        # If no endpoint works, fall back to first one with Bearer auth
+        print("⚠️ No working endpoint found, using fallback")
+        self.working_headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {self.api_key}"
+        }
+        return self.possible_endpoints[0]
+    
+    def _get_available_models(self):
+        """Try to get available models from the API"""
+        models_endpoints = [
+            f"{self.base_url.replace('/chat/completions', '/models')}",
+            f"{self.base_url.replace('/v1/chat/completions', '/v1/models')}",
+            "https://chat.copdev.azpriv-cloud.ubs.net/api/models",
+            "https://chat.copdev.azpriv-cloud.ubs.net/v1/models",
+        ]
+        
+        for endpoint in models_endpoints:
+            try:
+                response = requests.get(endpoint, headers=self.working_headers, timeout=10, verify=False)
+                if response.status_code == 200:
+                    models_data = response.json()
+                    if 'data' in models_data:
+                        models = [model['id'] for model in models_data['data']]
+                        print(f"✓ Found models: {models}")
+                        return models
+            except Exception as e:
+                continue
+        
+        return self.available_models  # Fallback to hardcoded models
+    
+    def _select_best_model(self):
+        """Select the best available model"""
+        preferred_models = [
+            "llama-4-scout-instruct",
+            "llama-3.3-70b-instruct",
+            "llama-3-70b-instruct",
+            "llama-2-70b-chat"
+        ]
+        
+        for model in preferred_models:
+            if model in self.available_models:
+                print(f"✓ Selected model: {model}")
+                return model
+        
+        # Use first available model
+        if self.available_models:
+            model = self.available_models[0]
+            print(f"Using first available model: {model}")
+            return model
+        
+        return "llama-4-scout-instruct"  # Final fallback
+    
+    def generate_documentation(self, code_chunk, project_name=""):
+        """Generate documentation for code chunk using Open WebUI"""
+        model = self._select_best_model()
+        
+        prompt = f"""You are an expert technical documentation generator. Analyze the provided code and generate comprehensive documentation.
+
+Project: {project_name}
+Files included: {', '.join(code_chunk['files'])}
+
+Code Content:
+{code_chunk['content']}
+
+Generate detailed documentation that includes:
+1. **Overview**: Brief description of what these files do
+2. **Key Components**: Main classes, functions, and their purposes  
+3. **Dependencies**: External libraries and frameworks used
+4. **Code Structure**: How the code is organized
+5. **Technical Details**: Important implementation details
+
+Format the response in clear markdown with proper headers and code examples where relevant."""
+
+        payload = {
+            "model": model,
+            "messages": [
+                {"role": "user", "content": prompt}
+            ],
+            "max_tokens": 2000,
+            "temperature": 0.3,
+            "stream": False  # Ensure no streaming
+        }
+        
+        try:
+            print(f"Making API request to {self.base_url}")
+            print(f"Using model: {model}")
+            
+            response = requests.post(
+                self.base_url, 
+                headers=self.working_headers, 
+                json=payload, 
+                timeout=60, 
+                verify=False
+            )
+            
+            print(f"Response status: {response.status_code}")
+            
+            if response.status_code != 200:
+                print(f"Response headers: {dict(response.headers)}")
+                print(f"Response text: {response.text}")
+                
+                # Try alternative request format for Open WebUI
+                if response.status_code == 405:
+                    return self._try_alternative_request_format(payload, code_chunk, project_name)
+            
+            response.raise_for_status()
+            result = response.json()
+            
+            # Handle Open WebUI response format
+            if "choices" in result and len(result["choices"]) > 0:
+                return result["choices"][0]["message"]["content"]
+            elif "response" in result:
+                return result["response"]
+            elif "content" in result:
+                return result["content"]
+            elif "message" in result:
+                return result["message"]
+            else:
+                return f"Unexpected response format: {result}"
+            
+        except requests.exceptions.HTTPError as e:
+            return self._handle_http_error(e, response)
+        except requests.exceptions.ConnectionError as e:
+            return f"Connection Error: Unable to connect to UBS Open WebUI. Check your network connection and VPN. Details: {str(e)}"
+        except requests.exceptions.Timeout as e:
+            return f"Timeout Error: Request took too long. Try again."
+        except Exception as e:
+            return f"Error generating documentation: {str(e)}"
+    
+    def _try_alternative_request_format(self, payload, code_chunk, project_name):
+        """Try alternative request formats for Open WebUI"""
+        print("Trying alternative Open WebUI request formats...")
+        
+        # Alternative 1: Different endpoint structure
+        alt_endpoints = [
+            "https://chat.copdev.azpriv-cloud.ubs.net/api/generate",
+            "https://chat.copdev.azpriv-cloud.ubs.net/generate",
+            "https://chat.copdev.azpriv-cloud.ubs.net/api/chat",
+        ]
+        
+        # Alternative payload format for Open WebUI
+        alt_payload = {
+            "model": payload["model"],
+            "prompt": payload["messages"][0]["content"],
+            "max_tokens": payload["max_tokens"],
+            "temperature": payload["temperature"],
+            "stream": False
+        }
+        
+        for endpoint in alt_endpoints:
+            try:
+                print(f"Trying alternative endpoint: {endpoint}")
+                response = requests.post(
+                    endpoint,
+                    headers=self.working_headers,
+                    json=alt_payload,
+                    timeout=60,
+                    verify=False
+                )
+                
+                if response.status_code == 200:
+                    result = response.json()
+                    if "response" in result:
+                        return result["response"]
+                    elif "text" in result:
+                        return result["text"]
+                        
+            except Exception as e:
+                print(f"Alternative endpoint {endpoint} failed: {str(e)}")
+                continue
+        
+        return "Error: Could not find compatible API endpoint. Please check with your IT team for the correct Open WebUI API endpoint and authentication method."
+    
+    def _handle_http_error(self, e, response):
+        """Handle HTTP errors with helpful messages"""
+        if response.status_code == 401:
+            return "Authentication Error: Invalid API key. Please check your UBS API credentials."
+        elif response.status_code == 403:
+            return "Access Forbidden: Check your permissions for the UBS Open WebUI service."
+        elif response.status_code == 404:
+            return "API Endpoint Not Found: The chat completions endpoint doesn't exist. Check with IT for correct URL."
+        elif response.status_code == 405:
+            return "Method Not Allowed: The endpoint doesn't support POST requests. This suggests wrong API endpoint."
+        elif response.status_code == 429:
+            return "Rate Limit Error: Too many requests. Please try again later."
+        elif response.status_code == 500:
+            return "Server Error: The Open WebUI server encountered an error. Try again later."
+        else:
+            return f"HTTP Error {response.status_code}: {response.text}"
+    
+    def generate_project_overview(self, project_info, all_files):
+        """Generate overall project documentation"""
+        model = self._select_best_model()
+        
+        files_list = "\n".join([f"- {f}" for f in all_files[:20]])
+        if len(all_files) > 20:
+            files_list += f"\n... and {len(all_files) - 20} more files"
+        
+        prompt = f"""Generate a comprehensive project README for this GitLab repository:
+
+Project Name: {project_info.get('name', 'Unknown')}
+Description: {project_info.get('description', 'No description provided')}
+Default Branch: {project_info.get('default_branch', 'main')}
+
+Files in repository:
+{files_list}
+
+Create a professional README that includes:
+1. **Project Title and Description**
+2. **Architecture Overview** 
+3. **Technology Stack**
+4. **Installation Instructions**
+5. **Usage Guide**
+6. **File Structure Explanation**
+7. **Contributing Guidelines**
+
+Make it comprehensive and suitable for both developers and stakeholders."""
+
+        payload = {
+            "model": model,
+            "messages": [
+                {"role": "user", "content": prompt}
+            ],
+            "max_tokens": 3000,
+            "temperature": 0.2,
+            "stream": False
+        }
+        
+        try:
+            response = requests.post(
+                self.base_url, 
+                headers=self.working_headers, 
+                json=payload, 
+                timeout=60, 
+                verify=False
+            )
+            
+            if response.status_code == 200:
+                result = response.json()
+                if "choices" in result and len(result["choices"]) > 0:
+                    return result["choices"][0]["message"]["content"]
+                elif "response" in result:
+                    return result["response"]
+                elif "content" in result:
+                    return result["content"]
+            
+            return f"Error generating project overview: {response.status_code} - {response.text}"
+            
+        except Exception as e:
+            return f"Error generating project overview: {str(e)}"
+
+
+# Usage notes for UBS IT team:
+"""
+TROUBLESHOOTING GUIDE:
+
+If you're still getting 405 errors, ask your IT team for:
+
+1. CORRECT API ENDPOINT:
+   - What is the exact URL for chat completions?
+   - Common formats: /v1/chat/completions, /api/chat, /generate
+
+2. AUTHENTICATION METHOD:
+   - Bearer token? API key header? Custom auth?
+   - Example: Authorization: Bearer <token> vs X-API-Key: <key>
+
+3. REQUEST FORMAT:
+   - Does it use OpenAI format or custom format?
+   - Does it require specific headers?
+
+4. AVAILABLE MODELS:
+   - What are the exact model names?
+   - How to list available models?
+
+COMMON OPEN WEBUI ENDPOINTS:
+- https://your-domain/v1/chat/completions (OpenAI compatible)
+- https://your-domain/api/chat/completions
+- https://your-domain/api/generate
+- https://your-domain/ollama/api/generate (if using Ollama backend)
+
+EXAMPLE CURL TEST:
+curl -X POST "https://chat.copdev.azpriv-cloud.ubs.net/v1/chat/completions" \
+  -H "Authorization: Bearer YOUR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "llama-4-scout-instruct",
+    "messages": [{"role": "user", "content": "Hello"}],
+    "max_tokens": 10
+  }'
+"""
