@@ -464,3 +464,330 @@ class DocumentationGenerator:
             
         except Exception as e:
             raise Exception(f"Documentation generation failed: {str(e)}")
+
+
+#main.py
+
+# Updated main.py with SSL configuration option
+
+import tkinter as tk
+from tkinter import messagebox, scrolledtext, filedialog, ttk
+import threading
+from core import DocumentationGenerator
+
+class App(tk.Tk):
+    def __init__(self):
+        super().__init__()
+        self.title("GitLab AI Documentation Generator")
+        self.geometry("950x750")
+        self.resizable(True, True)
+        
+        self.doc_generator = None
+        self.setup_ui()
+        
+    def setup_ui(self):
+        # Main frame
+        main_frame = tk.Frame(self, padx=20, pady=20)
+        main_frame.pack(fill=tk.BOTH, expand=True)
+        
+        # Title
+        title_label = tk.Label(main_frame, text="GitLab AI Documentation Generator", 
+                              font=("Arial", 16, "bold"))
+        title_label.pack(pady=(0, 20))
+        
+        # URL input section
+        url_frame = tk.Frame(main_frame)
+        url_frame.pack(fill=tk.X, pady=(0, 10))
+        
+        self.url_label = tk.Label(url_frame, text="GitLab Repository URL:", font=("Arial", 10))
+        self.url_label.pack(anchor=tk.W)
+        
+        self.url_entry = tk.Entry(url_frame, width=80, font=("Arial", 10))
+        self.url_entry.pack(fill=tk.X, pady=(5, 0))
+        
+        # SSL Configuration section
+        ssl_frame = tk.Frame(main_frame)
+        ssl_frame.pack(fill=tk.X, pady=(5, 10))
+        
+        self.ssl_var = tk.BooleanVar(value=True)
+        self.ssl_checkbox = tk.Checkbutton(ssl_frame, text="Verify SSL Certificates (uncheck if getting SSL errors)", 
+                                         variable=self.ssl_var, font=("Arial", 9))
+        self.ssl_checkbox.pack(anchor=tk.W)
+        
+        # Info label
+        info_label = tk.Label(ssl_frame, text="Note: If you get SSL certificate errors, try unchecking the SSL verification option above.", 
+                             font=("Arial", 8), fg="gray")
+        info_label.pack(anchor=tk.W, pady=(2, 0))
+        
+        # Buttons frame
+        button_frame = tk.Frame(main_frame)
+        button_frame.pack(fill=tk.X, pady=10)
+        
+        self.generate_button = tk.Button(button_frame, text="Generate Documentation", 
+                                       command=self.start_generation, bg="#4CAF50", 
+                                       fg="white", font=("Arial", 10, "bold"))
+        self.generate_button.pack(side=tk.LEFT, padx=(0, 10))
+        
+        self.save_button = tk.Button(button_frame, text="Save Documentation", 
+                                   command=self.save_documentation, state=tk.DISABLED,
+                                   bg="#2196F3", fg="white", font=("Arial", 10))
+        self.save_button.pack(side=tk.LEFT, padx=(0, 10))
+        
+        self.clear_button = tk.Button(button_frame, text="Clear Output", 
+                                    command=self.clear_output, bg="#FF9800", 
+                                    fg="white", font=("Arial", 10))
+        self.clear_button.pack(side=tk.LEFT)
+        
+        # Status section
+        status_frame = tk.Frame(main_frame)
+        status_frame.pack(fill=tk.X, pady=(10, 5))
+        
+        self.status_label = tk.Label(status_frame, text="Status: Ready", 
+                                   font=("Arial", 10), fg="green")
+        self.status_label.pack(anchor=tk.W)
+        
+        # Progress bar
+        self.progress_var = tk.StringVar()
+        self.progress_label = tk.Label(status_frame, textvariable=self.progress_var, 
+                                     font=("Arial", 9), fg="blue")
+        self.progress_label.pack(anchor=tk.W)
+        
+        # Add progress bar widget
+        self.progress_bar = ttk.Progressbar(status_frame, mode='indeterminate')
+        self.progress_bar.pack(fill=tk.X, pady=(5, 0))
+        
+        # Documentation output
+        output_label = tk.Label(main_frame, text="Generated Documentation:", 
+                              font=("Arial", 10, "bold"))
+        output_label.pack(anchor=tk.W, pady=(20, 5))
+        
+        self.text_area = scrolledtext.ScrolledText(main_frame, wrap=tk.WORD, 
+                                                 font=("Consolas", 9), height=25)
+        self.text_area.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
+        
+    def start_generation(self):
+        repo_url = self.url_entry.get().strip()
+        if not repo_url:
+            messagebox.showerror("Error", "Please enter a GitLab repository URL.")
+            return
+        
+        # Validate URL format
+        if not (repo_url.startswith('http://') or repo_url.startswith('https://')):
+            messagebox.showerror("Error", "Please enter a valid URL starting with http:// or https://")
+            return
+            
+        self.generate_button.config(state=tk.DISABLED)
+        self.save_button.config(state=tk.DISABLED)
+        self.text_area.delete(1.0, tk.END)
+        self.progress_bar.start()
+        
+        # Initialize doc generator with SSL setting
+        verify_ssl = self.ssl_var.get()
+        self.doc_generator = DocumentationGenerator(verify_ssl=verify_ssl)
+        
+        # Start generation in separate thread
+        thread = threading.Thread(target=self.generate_docs, args=(repo_url,))
+        thread.daemon = True
+        thread.start()
+        
+    def generate_docs(self, repo_url):
+        try:
+            def update_status(message):
+                self.after(0, lambda: self.status_label.config(text=f"Status: {message}"))
+                self.after(0, lambda: self.progress_var.set(f"● {message}"))
+            
+            update_status("Starting documentation generation...")
+            documentation = self.doc_generator.generate_documentation(repo_url, update_status)
+            
+            self.after(0, lambda: self.text_area.insert(tk.END, documentation))
+            self.after(0, lambda: self.status_label.config(text="Status: Documentation generated successfully!", fg="green"))
+            self.after(0, lambda: self.progress_var.set("✓ Complete"))
+            self.after(0, lambda: self.save_button.config(state=tk.NORMAL))
+            
+        except Exception as e:
+            error_msg = str(e)
+            self.after(0, lambda: messagebox.showerror("Error", f"Failed to generate documentation:\n\n{error_msg}"))
+            self.after(0, lambda: self.status_label.config(text="Status: Error occurred", fg="red"))
+            self.after(0, lambda: self.progress_var.set("✗ Failed"))
+            
+            # Add helpful SSL error message
+            if "SSL" in error_msg or "certificate" in error_msg.lower():
+                self.after(0, lambda: messagebox.showinfo("SSL Help", 
+                    "SSL certificate error detected!\n\n"
+                    "Try the following:\n"
+                    "1. Uncheck 'Verify SSL Certificates' option\n"
+                    "2. Check if the GitLab URL is correct\n"
+                    "3. Verify your network connection\n"
+                    "4. Check if you need to be on VPN"))
+        finally:
+            self.after(0, lambda: self.generate_button.config(state=tk.NORMAL))
+            self.after(0, lambda: self.progress_bar.stop())
+    
+    def save_documentation(self):
+        content = self.text_area.get(1.0, tk.END)
+        if not content.strip():
+            messagebox.showwarning("Warning", "No documentation to save.")
+            return
+            
+        file_path = filedialog.asksaveasfilename(
+            defaultextension=".md",
+            filetypes=[("Markdown files", "*.md"), ("Text files", "*.txt"), ("All files", "*.*")]
+        )
+        
+        if file_path:
+            try:
+                with open(file_path, 'w', encoding='utf-8') as f:
+                    f.write(content)
+                messagebox.showinfo("Success", f"Documentation saved to {file_path}")
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to save file: {str(e)}")
+    
+    def clear_output(self):
+        self.text_area.delete(1.0, tk.END)
+        self.status_label.config(text="Status: Ready", fg="green")
+        self.progress_var.set("")
+        self.save_button.config(state=tk.DISABLED)
+
+if __name__ == '__main__':
+    app = App()
+    app.mainloop()
+#config.py
+
+import os
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
+
+# GitLab Configuration
+GITLAB_TOKEN = os.getenv("GITLAB_TOKEN")
+if not GITLAB_TOKEN:
+    raise ValueError("GITLAB_TOKEN not found in environment variables. Please add it to your .env file.")
+
+# LLaMA API Configuration  
+LLAMA_API_KEY = os.getenv("LLAMA_API_KEY")
+if not LLAMA_API_KEY:
+    raise ValueError("LLAMA_API_KEY not found in environment variables. Please add it to your .env file.")
+
+# Azure Configuration (Optional - for future use)
+AZURE_STORAGE_CONNECTION_STRING = os.getenv("AZURE_STORAGE_CONNECTION_STRING")
+AZURE_COSMOS_CONNECTION_STRING = os.getenv("AZURE_COSMOS_CONNECTION_STRING")
+
+# Application Settings
+MAX_FILES_TO_PROCESS = 15  # Limit number of files to process
+MAX_CHUNK_SIZE = 4000      # Maximum characters per chunk for LLaMA
+
+#azure storage 
+
+import os
+from datetime import datetime
+from config import AZURE_STORAGE_CONNECTION_STRING, AZURE_COSMOS_CONNECTION_STRING
+
+# Placeholder for future Azure integration
+# Uncomment and implement when you're ready to add Azure functionality
+
+class AzureStorageManager:
+    def __init__(self):
+        self.storage_connection_string = AZURE_STORAGE_CONNECTION_STRING
+        self.cosmos_connection_string = AZURE_COSMOS_CONNECTION_STRING
+        
+    def upload_document_to_blob(self, document_content, filename, container_name="documentation"):
+        """
+        Upload generated documentation to Azure Blob Storage
+        """
+        # TODO: Implement Azure Blob Storage upload
+        # from azure.storage.blob import BlobServiceClient
+        
+        try:
+            # blob_service_client = BlobServiceClient.from_connection_string(self.storage_connection_string)
+            # blob_client = blob_service_client.get_blob_client(container=container_name, blob=filename)
+            # blob_client.upload_blob(document_content, overwrite=True)
+            print(f"Would upload {filename} to Azure Blob Storage")
+            return f"https://yourstorageaccount.blob.core.windows.net/{container_name}/{filename}"
+        except Exception as e:
+            raise Exception(f"Failed to upload to Azure Blob Storage: {str(e)}")
+    
+    def save_metadata_to_cosmos(self, metadata):
+        """
+        Save document metadata to Azure Cosmos DB
+        """
+        # TODO: Implement Azure Cosmos DB integration
+        # from azure.cosmos import CosmosClient
+        
+        try:
+            # cosmos_client = CosmosClient.from_connection_string(self.cosmos_connection_string)
+            # database = cosmos_client.get_database_client("DocumentationDB")
+            # container = database.get_container_client("DocumentMetadata")
+            # container.create_item(metadata)
+            print(f"Would save metadata to Cosmos DB: {metadata}")
+            return True
+        except Exception as e:
+            raise Exception(f"Failed to save metadata to Cosmos DB: {str(e)}")
+    
+    def get_document_history(self, repo_url):
+        """
+        Retrieve document generation history for a repository
+        """
+        # TODO: Implement retrieval from Cosmos DB
+        return []
+    
+    def store_documentation(self, repo_url, documentation_content, project_name):
+        """
+        Complete storage workflow: upload to blob and save metadata
+        """
+        try:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"{project_name}_{timestamp}.md"
+            
+            # Upload to blob storage
+            blob_url = self.upload_document_to_blob(documentation_content, filename)
+            
+            # Save metadata
+            metadata = {
+                "id": f"{project_name}_{timestamp}",
+                "repo_url": repo_url,
+                "project_name": project_name,
+                "filename": filename,
+                "blob_url": blob_url,
+                "created_at": datetime.now().isoformat(),
+                "document_type": "auto_generated",
+                "file_size": len(documentation_content)
+            }
+            
+            self.save_metadata_to_cosmos(metadata)
+            
+            return {
+                "success": True,
+                "blob_url": blob_url,
+                "metadata": metadata
+            }
+            
+        except Exception as e:
+            return {
+                "success": False,
+                "error": str(e)
+            }
+
+# Example usage (for future implementation)
+def store_generated_documentation(repo_url, documentation, project_name):
+    """
+    Helper function to store documentation in Azure
+    """
+    if AZURE_STORAGE_CONNECTION_STRING and AZURE_COSMOS_CONNECTION_STRING:
+        storage_manager = AzureStorageManager()
+        result = storage_manager.store_documentation(repo_url, documentation, project_name)
+        return result
+    else:
+        print("Azure credentials not configured. Skipping cloud storage.")
+        return {"success": False, "error": "Azure not configured"}
+
+#requirements.txt
+python-dotenv==1.0.0
+requests==2.31.0
+urllib3==2.0.4
+
+#create .env also 
+for llama 
+for gitlab 
+for azure cosmos
+for azure db
