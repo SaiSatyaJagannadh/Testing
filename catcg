@@ -1,1 +1,59 @@
-cdsl-- file format
+def _get_llm_analysis(self, comparison_results):
+    """Get LLM analysis of unmatched patterns"""
+    if not self.llm_endpoint or not self.llm_model:
+        self.logger.warning("LLM configuration not found. Skipping LLM analysis.")
+        return {"error": "LLM not configured"}
+    
+    try:
+        # Import and disable SSL warnings
+        import urllib3
+        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+        
+        prompt = self.pattern_matcher.generate_llm_analysis_prompt(comparison_results)
+        
+        headers = {
+            'Content-Type': 'application/json',
+        }
+        
+        if self.llm_api_key:
+            headers['Authorization'] = f'Bearer {self.llm_api_key}'
+        
+        payload = {
+            'model': self.llm_model,
+            'messages': [
+                {
+                    'role': 'system',
+                    'content': 'You are an expert log analyst. Analyze the provided log patterns and provide insights.'
+                },
+                {
+                    'role': 'user',
+                    'content': prompt
+                }
+            ],
+            'max_tokens': 1000,
+            'temperature': 0.1
+        }
+        
+        # SSL fix - this will resolve your certificate error
+        response = requests.post(
+            self.llm_endpoint,
+            headers=headers,
+            json=payload,
+            timeout=30,
+            verify=False  # Bypasses SSL certificate verification
+        )
+        
+        if response.status_code == 200:
+            result = response.json()
+            return {
+                'analysis': result.get('choices', [{}])[0].get('message', {}).get('content', ''),
+                'timestamp': Utils.get_timestamp(),
+                'model': self.llm_model
+            }
+        else:
+            self.logger.error(f"LLM API error: {response.status_code} - {response.text}")
+            return {"error": f"LLM API error: {response.status_code}"}
+            
+    except Exception as e:
+        self.logger.error(f"Error getting LLM analysis: {str(e)}")
+        return {"error": str(e)}
