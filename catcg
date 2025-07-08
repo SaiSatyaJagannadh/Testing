@@ -1,0 +1,1393 @@
+DgProcess/
+├── data/
+│   ├── raw_csv/                    # Input CSV files (place your CSV files here)
+│   ├── processed_base/             # Base patterns (first run)
+│   ├── processed_new/              # New processed files  
+│   └── pattern_database/           # Pattern storage & metadata
+├── results/
+│   ├── comparison_logs/            # JSON logs of comparisons
+│   ├── matched_patterns/           # Patterns that matched base
+│   ├── unmatched_patterns/         # New patterns to analyze
+│   └── reports/                    # Summary reports
+├── src/
+│   ├── processlogloomdata.py       # CSV processing & pattern extraction
+│   ├── comparelogdata.py           # Pattern comparison logic
+│   ├── pattern_matcher.py          # Core matching algorithms
+│   ├── display_manager.py          # Terminal display & JSON output
+│   └── utils.py                    # Utility functions
+├── config/
+│   ├── config.yaml                 # Configuration
+│   └── sql_error_codes.yaml        # Known SQL errors
+├── logs/                           # Application logs
+├── .env                            # Environment variables
+├── requirements.txt                # Python dependencies
+└── main.py                         # Main entry point
+
+
+# LLM Configuration
+LLM_MODEL_NAME=llama-4-scout-instruct
+LLM_ENDPOINT=https://chat.copdev.azpriv-cloud.ubs.net/api/v1/chat/completions
+LLM_API_KEY=your_api_key_here
+
+# Project Configuration
+PROJECT_NAME=SmartLogLoomer
+LOG_LEVEL=INFO
+MAX_PATTERN_SIMILARITY=0.85
+
+
+pandas==1.3.5
+numpy==1.21.6
+pyyaml==6.0
+python-dotenv==0.19.2
+requests==2.28.2
+scikit-learn==1.0.2
+fuzzywuzzy==0.18.0
+python-Levenshtein==0.12.2
+colorama==0.4.6
+tqdm==4.64.1
+
+##config.yml
+
+  # SmartLogLoomer Configuration
+project:
+  name: "SmartLogLoomer"
+  version: "1.0.0"
+
+paths:
+  raw_csv: "data/raw_csv/"
+  processed_base: "data/processed_base/"
+  processed_new: "data/processed_new/"
+  pattern_database: "data/pattern_database/"
+  comparison_logs: "results/comparison_logs/"
+  matched_patterns: "results/matched_patterns/"
+  unmatched_patterns: "results/unmatched_patterns/"
+  reports: "results/reports/"
+  logs: "logs/"
+
+processing:
+  chunk_size: 10000
+  similarity_threshold: 0.85
+  pattern_min_frequency: 2
+
+csv_columns:
+  required:
+    - "AccountNumber"
+    - "workingSession"
+    - "Proposal"
+    - "UAN"
+    - "operation_Name"
+    - "outerMessage"
+    - "operation_Id"
+  
+  output:
+    - "AccountNumber"
+    - "workingSession"
+    - "Proposal"
+    - "UAN"
+    - "operation_Name"
+    - "operation_Id"
+    - "error_code"
+    - "error_type"
+    - "url_path"
+    - "message_content"
+    - "timestamp"
+
+llm:
+  max_tokens: 1000
+  temperature: 0.1
+  timeout: 30
+
+
+##sql.yaml
+
+  # SQL Error Codes based on your images
+sql_errors:
+  "-205":
+    description: "SQL column name does not exist within target TABLENAME"
+    category: "COLUMN_ERROR"
+    severity: "HIGH"
+  
+  "-301":
+    description: "USAGE type or length does not conform to SQL table definition"
+    category: "TYPE_MISMATCH"
+    severity: "MEDIUM"
+  
+  "-302":
+    description: "USAGE type or length does not conform to SQL table definition"
+    category: "TYPE_MISMATCH"
+    severity: "MEDIUM"
+  
+  "-309":
+    description: "Null value in predicate where nulls are not allowed"
+    category: "NULL_VALUE"
+    severity: "HIGH"
+  
+  "-407":
+    description: "Null value in update statement where nulls are not allowed"
+    category: "NULL_VALUE"
+    severity: "HIGH"
+  
+  "-551":
+    description: "Not authorized to perform SQL action"
+    category: "AUTHORIZATION"
+    severity: "HIGH"
+  
+  "-552":
+    description: "Not authorized to perform SQL action"
+    category: "AUTHORIZATION"
+    severity: "HIGH"
+  
+  "-601":
+    description: "Table, index, or view name already exists"
+    category: "DUPLICATE_OBJECT"
+    severity: "MEDIUM"
+  
+  "-612":
+    description: "Duplicate SQL column names in table creation"
+    category: "DUPLICATE_COLUMN"
+    severity: "HIGH"
+  
+  "-803":
+    description: "Duplicate value in UNIQUE INDEX column"
+    category: "UNIQUE_CONSTRAINT"
+    severity: "MEDIUM"
+
+http_errors:
+  "404":
+    description: "Not Found - Resource does not exist"
+    category: "HTTP_ERROR"
+    severity: "MEDIUM"
+  
+  "500":
+    description: "Internal Server Error"
+    category: "HTTP_ERROR"
+    severity: "HIGH"
+  
+  "403":
+    description: "Forbidden - Access denied"
+    category: "HTTP_ERROR"
+    severity: "HIGH"
+
+
+  src/utils.py
+
+import os
+import json
+import logging
+import pandas as pd
+from datetime import datetime
+from pathlib import Path
+import yaml
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
+
+class Utils:
+    @staticmethod
+    def setup_logging(log_level="INFO"):
+        """Setup logging configuration"""
+        log_dir = Path("logs")
+        log_dir.mkdir(exist_ok=True)
+        
+        logging.basicConfig(
+            level=getattr(logging, log_level),
+            format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+            handlers=[
+                logging.FileHandler(f"logs/smartlogloomer_{datetime.now().strftime('%Y%m%d')}.log"),
+                logging.StreamHandler()
+            ]
+        )
+        return logging.getLogger(__name__)
+    
+    @staticmethod
+    def load_config(config_path="config/config.yaml"):
+        """Load configuration from YAML file"""
+        try:
+            with open(config_path, 'r') as file:
+                return yaml.safe_load(file)
+        except FileNotFoundError:
+            logging.error(f"Configuration file not found: {config_path}")
+            return {}
+    
+    @staticmethod
+    def load_sql_errors(error_path="config/sql_error_codes.yaml"):
+        """Load SQL error codes from YAML file"""
+        try:
+            with open(error_path, 'r') as file:
+                return yaml.safe_load(file)
+        except FileNotFoundError:
+            logging.error(f"SQL error codes file not found: {error_path}")
+            return {}
+    
+    @staticmethod
+    def create_directories(config):
+        """Create necessary directories"""
+        paths = config.get('paths', {})
+        for path_name, path_value in paths.items():
+            Path(path_value).mkdir(parents=True, exist_ok=True)
+    
+    @staticmethod
+    def save_json(data, filepath):
+        """Save data to JSON file"""
+        with open(filepath, 'w') as f:
+            json.dump(data, f, indent=2, default=str)
+    
+    @staticmethod
+    def load_json(filepath):
+        """Load data from JSON file"""
+        try:
+            with open(filepath, 'r') as f:
+                return json.load(f)
+        except FileNotFoundError:
+            return {}
+    
+    @staticmethod
+    def get_timestamp():
+        """Get current timestamp"""
+        return datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
+###processlogloomdata.py
+
+import pandas as pd
+import re
+import json
+import logging
+from pathlib import Path
+from datetime import datetime
+from urllib.parse import urlparse
+from src.utils import Utils
+
+class ProcessLogLoomData:
+    def __init__(self, config_path="config/config.yaml"):
+        self.config = Utils.load_config(config_path)
+        self.sql_errors = Utils.load_sql_errors()
+        self.logger = logging.getLogger(__name__)
+        Utils.create_directories(self.config)
+    
+    def process_csv_file(self, csv_file_path, is_base_file=False):
+        """
+        Process CSV file and extract patterns from outerMessage column
+        
+        Args:
+            csv_file_path (str): Path to the CSV file
+            is_base_file (bool): Whether this is the base file for comparison
+        """
+        try:
+            # Read CSV file
+            df = pd.read_csv(csv_file_path)
+            self.logger.info(f"Processing CSV file: {csv_file_path}")
+            self.logger.info(f"Original data shape: {df.shape}")
+            
+            # Validate required columns
+            required_columns = self.config['csv_columns']['required']
+            missing_columns = [col for col in required_columns if col not in df.columns]
+            
+            if missing_columns:
+                self.logger.error(f"Missing required columns: {missing_columns}")
+                return None
+            
+            # Process outerMessage column
+            processed_df = self._process_outer_message(df)
+            
+            # Save processed data
+            output_path = self._save_processed_data(processed_df, csv_file_path, is_base_file)
+            
+            # Extract and save patterns
+            patterns = self._extract_patterns(processed_df)
+            self._save_patterns(patterns, csv_file_path, is_base_file)
+            
+            self.logger.info(f"Processing completed. Output saved to: {output_path}")
+            return processed_df
+            
+        except Exception as e:
+            self.logger.error(f"Error processing CSV file: {str(e)}")
+            return None
+    
+    def _process_outer_message(self, df):
+        """Process outerMessage column to extract error codes, URLs, and content"""
+        processed_data = []
+        
+        for index, row in df.iterrows():
+            outer_message = str(row.get('outerMessage', ''))
+            
+            # Extract error information
+            error_info = self._extract_error_info(outer_message)
+            
+            # Create new row with processed data
+            new_row = {
+                'AccountNumber': row.get('AccountNumber', ''),
+                'workingSession': row.get('workingSession', ''),
+                'Proposal': row.get('Proposal', ''),
+                'UAN': row.get('UAN', ''),
+                'operation_Name': row.get('operation_Name', ''),
+                'operation_Id': row.get('operation_Id', ''),
+                'error_code': error_info['error_code'],
+                'error_type': error_info['error_type'],
+                'url_path': error_info['url_path'],
+                'message_content': error_info['message_content'],
+                'timestamp': Utils.get_timestamp(),
+                'original_message': outer_message
+            }
+            
+            processed_data.append(new_row)
+        
+        return pd.DataFrame(processed_data)
+    
+    def _extract_error_info(self, message):
+        """Extract error codes, URLs, and content from outerMessage"""
+        error_info = {
+            'error_code': '',
+            'error_type': '',
+            'url_path': '',
+            'message_content': message
+        }
+        
+        # Extract HTTP error codes (404, 500, etc.)
+        http_pattern = r'\b(404|500|403|401|502|503)\b'
+        http_match = re.search(http_pattern, message)
+        if http_match:
+            error_info['error_code'] = http_match.group(1)
+            error_info['error_type'] = 'HTTP_ERROR'
+        
+        # Extract SQL error codes (-205, -301, etc.)
+        sql_pattern = r'-(\d{3})'
+        sql_match = re.search(sql_pattern, message)
+        if sql_match:
+            error_code = f"-{sql_match.group(1)}"
+            error_info['error_code'] = error_code
+            
+            # Get error type from configuration
+            sql_errors = self.sql_errors.get('sql_errors', {})
+            if error_code in sql_errors:
+                error_info['error_type'] = sql_errors[error_code]['category']
+        
+        # Extract URL paths
+        url_pattern = r'(https?://[^\s]+|/[^\s]*)'
+        url_match = re.search(url_pattern, message)
+        if url_match:
+            url = url_match.group(1)
+            try:
+                parsed_url = urlparse(url)
+                error_info['url_path'] = parsed_url.path
+            except:
+                error_info['url_path'] = url
+        
+        # Extract service names and operations
+        service_pattern = r'(POST|GET|PUT|DELETE)\s+(/[^\s]*)'
+        service_match = re.search(service_pattern, message)
+        if service_match:
+            error_info['url_path'] = service_match.group(2)
+        
+        return error_info
+    
+    def _save_processed_data(self, df, original_file_path, is_base_file):
+        """Save processed data to appropriate folder"""
+        file_name = Path(original_file_path).stem
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        
+        if is_base_file:
+            output_dir = Path(self.config['paths']['processed_base'])
+            output_file = f"{file_name}_base_processed.csv"
+        else:
+            output_dir = Path(self.config['paths']['processed_new'])
+            output_file = f"{file_name}_processed_{timestamp}.csv"
+        
+        output_path = output_dir / output_file
+        df.to_csv(output_path, index=False)
+        
+        return output_path
+    
+    def _extract_patterns(self, df):
+        """Extract patterns from processed data"""
+        patterns = {}
+        
+        # Group by error type and code
+        for error_type in df['error_type'].unique():
+            if pd.isna(error_type) or error_type == '':
+                continue
+                
+            type_data = df[df['error_type'] == error_type]
+            patterns[error_type] = {
+                'count': len(type_data),
+                'error_codes': type_data['error_code'].value_counts().to_dict(),
+                'common_urls': type_data['url_path'].value_counts().head(10).to_dict(),
+                'sample_messages': type_data['message_content'].head(5).tolist()
+            }
+        
+        return patterns
+    
+    def _save_patterns(self, patterns, original_file_path, is_base_file):
+        """Save extracted patterns"""
+        file_name = Path(original_file_path).stem
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        
+        pattern_data = {
+            'file_name': file_name,
+            'timestamp': timestamp,
+            'is_base_file': is_base_file,
+            'patterns': patterns
+        }
+        
+        output_dir = Path(self.config['paths']['pattern_database'])
+        output_file = f"{file_name}_patterns_{timestamp}.json"
+        output_path = output_dir / output_file
+        
+        Utils.save_json(pattern_data, output_path)
+        
+        return output_path
+
+# Example usage and integration with logloom.py (commented out)
+def main():
+    """Main function to process log data"""
+    processor = ProcessLogLoomData()
+    
+    # TODO: Uncomment and modify when logloom.py is ready
+    # from logloom import LogLoom
+    # logloom = LogLoom()
+    # csv_files = logloom.get_csv_files()
+    
+    # For now, process files from raw_csv directory
+    raw_csv_dir = Path("data/raw_csv/")
+    csv_files = list(raw_csv_dir.glob("*.csv"))
+    
+    if not csv_files:
+        print("No CSV files found in data/raw_csv/ directory")
+        print("Please place your CSV files in the data/raw_csv/ folder")
+        return
+    
+    for csv_file in csv_files:
+        print(f"\nProcessing: {csv_file}")
+        
+        # Check if this is the first file (base file)
+        processed_base_dir = Path("data/processed_base/")
+        is_base_file = len(list(processed_base_dir.glob("*.csv"))) == 0
+        
+        result = processor.process_csv_file(str(csv_file), is_base_file)
+        
+        if result is not None:
+            print(f"✓ Successfully processed {csv_file}")
+            print(f"  - Rows processed: {len(result)}")
+            print(f"  - Error types found: {result['error_type'].nunique()}")
+        else:
+            print(f"✗ Failed to process {csv_file}")
+
+if __name__ == "__main__":
+    main()
+
+##pattern_match.py
+
+import pandas as pd
+import numpy as np
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
+from fuzzywuzzy import fuzz
+import logging
+from src.utils import Utils
+
+class PatternMatcher:
+    def __init__(self, config_path="config/config.yaml"):
+        self.config = Utils.load_config(config_path)
+        self.logger = logging.getLogger(__name__)
+        self.similarity_threshold = self.config.get('processing', {}).get('similarity_threshold', 0.85)
+    
+    def compare_patterns(self, base_patterns, new_patterns):
+        """
+        Compare new patterns with base patterns
+        
+        Args:
+            base_patterns (dict): Base patterns from previous runs
+            new_patterns (dict): New patterns to compare
+            
+        Returns:
+            dict: Comparison results
+        """
+        comparison_results = {
+            'matched_patterns': {},
+            'unmatched_patterns': {},
+            'similarity_scores': {},
+            'recommendations': []
+        }
+        
+        try:
+            # Compare error types
+            for error_type, new_data in new_patterns.items():
+                if error_type in base_patterns:
+                    # Pattern exists in base, check similarity
+                    base_data = base_patterns[error_type]
+                    similarity = self._calculate_pattern_similarity(base_data, new_data)
+                    
+                    comparison_results['similarity_scores'][error_type] = similarity
+                    
+                    if similarity >= self.similarity_threshold:
+                        comparison_results['matched_patterns'][error_type] = {
+                            'base_data': base_data,
+                            'new_data': new_data,
+                            'similarity': similarity,
+                            'action': 'ignore'  # Known pattern
+                        }
+                    else:
+                        comparison_results['unmatched_patterns'][error_type] = {
+                            'base_data': base_data,
+                            'new_data': new_data,
+                            'similarity': similarity,
+                            'action': 'analyze'  # Pattern changed significantly
+                        }
+                        
+                        comparison_results['recommendations'].append(
+                            f"Pattern '{error_type}' has changed significantly (similarity: {similarity:.2f})"
+                        )
+                else:
+                    # New pattern not in base
+                    comparison_results['unmatched_patterns'][error_type] = {
+                        'base_data': None,
+                        'new_data': new_data,
+                        'similarity': 0.0,
+                        'action': 'new_pattern'
+                    }
+                    
+                    comparison_results['recommendations'].append(
+                        f"New pattern detected: '{error_type}' with {new_data['count']} occurrences"
+                    )
+            
+            return comparison_results
+            
+        except Exception as e:
+            self.logger.error(f"Error comparing patterns: {str(e)}")
+            return comparison_results
+    
+    def _calculate_pattern_similarity(self, base_data, new_data):
+        """Calculate similarity between two patterns"""
+        try:
+            # Compare error code distributions
+            base_codes = base_data.get('error_codes', {})
+            new_codes = new_data.get('error_codes', {})
+            
+            code_similarity = self._calculate_dict_similarity(base_codes, new_codes)
+            
+            # Compare URL patterns
+            base_urls = base_data.get('common_urls', {})
+            new_urls = new_data.get('common_urls', {})
+            
+            url_similarity = self._calculate_dict_similarity(base_urls, new_urls)
+            
+            # Compare message content using TF-IDF
+            base_messages = base_data.get('sample_messages', [])
+            new_messages = new_data.get('sample_messages', [])
+            
+            message_similarity = self._calculate_text_similarity(base_messages, new_messages)
+            
+            # Weighted average
+            overall_similarity = (
+                code_similarity * 0.4 +
+                url_similarity * 0.3 +
+                message_similarity * 0.3
+            )
+            
+            return overall_similarity
+            
+        except Exception as e:
+            self.logger.error(f"Error calculating pattern similarity: {str(e)}")
+            return 0.0
+    
+    def _calculate_dict_similarity(self, dict1, dict2):
+        """Calculate similarity between two dictionaries"""
+        if not dict1 and not dict2:
+            return 1.0
+        if not dict1 or not dict2:
+            return 0.0
+        
+        # Get common keys
+        common_keys = set(dict1.keys()) & set(dict2.keys())
+        all_keys = set(dict1.keys()) | set(dict2.keys())
+        
+        if not all_keys:
+            return 1.0
+        
+        # Jaccard similarity for keys
+        key_similarity = len(common_keys) / len(all_keys)
+        
+        # Value similarity for common keys
+        value_similarity = 0.0
+        if common_keys:
+            value_similarities = []
+            for key in common_keys:
+                val1, val2 = dict1[key], dict2[key]
+                if val1 == 0 and val2 == 0:
+                    value_similarities.append(1.0)
+                else:
+                    value_similarities.append(min(val1, val2) / max(val1, val2))
+            value_similarity = np.mean(value_similarities)
+        
+        return (key_similarity + value_similarity) / 2
+    
+    def _calculate_text_similarity(self, texts1, texts2):
+        """Calculate similarity between two lists of texts using TF-IDF"""
+        if not texts1 and not texts2:
+            return 1.0
+        if not texts1 or not texts2:
+            return 0.0
+        
+        try:
+            # Combine all texts
+            all_texts = texts1 + texts2
+            
+            if len(all_texts) < 2:
+                return 1.0
+            
+            # Create TF-IDF vectors
+            vectorizer = TfidfVectorizer(max_features=1000, stop_words='english')
+            tfidf_matrix = vectorizer.fit_transform(all_texts)
+            
+            # Calculate similarity between the two groups
+            group1_vector = tfidf_matrix[:len(texts1)].mean(axis=0)
+            group2_vector = tfidf_matrix[len(texts1):].mean(axis=0)
+            
+            similarity = cosine_similarity(group1_vector, group2_vector)[0][0]
+            
+            return max(0.0, similarity)  # Ensure non-negative
+            
+        except Exception as e:
+            self.logger.error(f"Error calculating text similarity: {str(e)}")
+            return 0.0
+    
+    def should_update_base(self, comparison_results):
+        """Determine if base patterns should be updated"""
+        unmatched_count = len(comparison_results['unmatched_patterns'])
+        total_patterns = len(comparison_results['matched_patterns']) + unmatched_count
+        
+        if total_patterns == 0:
+            return False
+        
+        # Update if more than 20% of patterns are unmatched
+        unmatched_ratio = unmatched_count / total_patterns
+        return unmatched_ratio > 0.2
+    
+    def generate_llm_analysis_prompt(self, comparison_results):
+        """Generate prompt for LLM analysis"""
+        prompt = f"""
+Analyze the following log pattern comparison results:
+
+MATCHED PATTERNS ({len(comparison_results['matched_patterns'])}):
+"""
+        
+        for pattern_type, data in comparison_results['matched_patterns'].items():
+            prompt += f"- {pattern_type}: Similarity {data['similarity']:.2f}\n"
+        
+        prompt += f"\nUNMATCHED PATTERNS ({len(comparison_results['unmatched_patterns'])}):\n"
+        
+        for pattern_type, data in comparison_results['unmatched_patterns'].items():
+            prompt += f"- {pattern_type}: {data['action']}\n"
+            if data['new_data']:
+                prompt += f"  Count: {data['new_data']['count']}\n"
+        
+        prompt += f"\nRECOMMENDATIONS:\n"
+        for rec in comparison_results['recommendations']:
+            prompt += f"- {rec}\n"
+        
+        prompt += """
+Please provide:
+1. Analysis of the pattern changes
+2. Potential root causes for new patterns
+3. Recommendations for system improvements
+4. Risk assessment of the unmatched patterns
+"""
+        
+        return prompt
+
+##compare log data
+
+import pandas as pd
+import json
+import logging
+from pathlib import Path
+from datetime import datetime
+import requests
+import os
+from src.utils import Utils
+from src.pattern_matcher import PatternMatcher
+
+class CompareLogData:
+    def __init__(self, config_path="config/config.yaml"):
+        self.config = Utils.load_config(config_path)
+        self.pattern_matcher = PatternMatcher(config_path)
+        self.logger = logging.getLogger(__name__)
+        self.llm_endpoint = os.getenv('LLM_ENDPOINT')
+        self.llm_model = os.getenv('LLM_MODEL_NAME')
+        self.llm_api_key = os.getenv('LLM_API_KEY')
+    
+    def compare_with_base(self, new_pattern_file):
+        """
+        Compare new patterns with base patterns
+        
+        Args:
+            new_pattern_file (str): Path to new pattern file
+            
+        Returns:
+            dict: Comparison results
+        """
+        try:
+            # Load new patterns
+            new_patterns = Utils.load_json(new_pattern_file)
+            
+            # Find base pattern file
+            base_pattern_file = self._find_base_pattern_file()
+            
+            if not base_pattern_file:
+                self.logger.warning("No base pattern file found. Creating new base.")
+                return self._create_new_base(new_pattern_file)
+            
+            # Load base patterns
+            base_patterns = Utils.load_json(base_pattern_file)
+            
+            # Compare patterns
+            comparison_results = self.pattern_matcher.compare_patterns(
+                base_patterns.get('patterns', {}),
+                new_patterns.get('patterns', {})
+            )
+            
+            # Add metadata
+            comparison_results['metadata'] = {
+                'base_file': base_pattern_file,
+                'new_file': new_pattern_file,
+                'comparison_timestamp': Utils.get_timestamp(),
+                'base_timestamp': base_patterns.get('timestamp', 'unknown'),
+                'new_timestamp': new_patterns.get('timestamp', 'unknown')
+            }
+            
+            # Save comparison results
+            self._save_comparison_results(comparison_results)
+            
+            # Generate LLM analysis if unmatched patterns exist
+            if comparison_results['unmatched_patterns']:
+                llm_analysis = self._get_llm_analysis(comparison_results)
+                comparison_results['llm_analysis'] = llm_analysis
+            
+            # Update base if needed
+            if self.pattern_matcher.should_update_base(comparison_results):
+                self._update_base_patterns(new_patterns, comparison_results)
+            
+            return comparison_results
+            
+        except Exception as e:
+            self.logger.error(f"Error comparing patterns: {str(e)}")
+            return {}
+    
+    def _find_base_pattern_file(self):
+        """Find the most recent base pattern file"""
+        base_dir = Path(self.config['paths']['pattern_database'])
+        base_files = list(base_dir.glob("*_patterns_*.json"))
+        
+        if not base_files:
+            return None
+        
+        # Load each file to check if it's a base file
+        for file_path in sorted(base_files, reverse=True):
+            try:
+                pattern_data = Utils.load_json(file_path)
+                if pattern_data.get('is_base_file', False):
+                    return str(file_path)
+            except:
+                continue
+        
+        return None
+    
+    def _create_new_base(self, pattern_file):
+        """Create new base from current patterns"""
+        patterns = Utils.load_json(pattern_file)
+        patterns['is_base_file'] = True
+        
+        # Save as base file
+        base_dir = Path(self.config['paths']['processed_base'])
+        base_file = base_dir / f"base_patterns_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+        Utils.save_json(patterns, base_file)
+        
+        self.logger.info(f"Created new base pattern file: {base_file}")
+        
+        return {
+            'metadata': {
+                'action': 'created_new_base',
+                'base_file': str(base_file),
+                'timestamp': Utils.get_timestamp()
+            },
+            'matched_patterns': {},
+            'unmatched_patterns': {},
+            'recommendations': ['New base pattern file created']
+        }
+    
+    def _save_comparison_results(self, results):
+        """Save comparison results to file"""
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        
+        # Save detailed results
+        results_dir = Path(self.config['paths']['comparison_logs'])
+        results_file = results_dir / f"comparison_{timestamp}.json"
+        Utils.save_json(results, results_file)
+        
+        # Save matched patterns
+        if results['matched_patterns']:
+            matched_dir = Path(self.config['paths']['matched_patterns'])
+            matched_file = matched_dir / f"matched_{timestamp}.json"
+            Utils.save_json(results['matched_patterns'], matched_file)
+        
+        # Save unmatched patterns
+        if results['unmatched_patterns']:
+            unmatched_dir = Path(self.config['paths']['unmatched_patterns'])
+            unmatched_file = unmatched_dir / f"unmatched_{timestamp}.json"
+            Utils.save_json(results['unmatched_patterns'], unmatched_file)
+        
+        self.logger.info(f"Comparison results saved to: {results_file}")
+    
+    def _get_llm_analysis(self, comparison_results):
+        """Get LLM analysis of unmatched patterns"""
+        if not self.llm_endpoint or not self.llm_model:
+            self.logger.warning("LLM configuration not found. Skipping LLM analysis.")
+            return {"error": "LLM not configured"}
+        
+        try:
+            prompt = self.pattern_matcher.generate_llm_analysis_prompt(comparison_results)
+            
+            headers = {
+                'Content-Type': 'application/json',
+            }
+            
+            if self.llm_api_key:
+                headers['Authorization'] = f'Bearer {self.llm_api_key}'
+            
+            payload = {
+                'model': self.llm_model,
+                'messages': [
+                    {
+                        'role': 'system',
+                        'content': 'You are an expert log analyst. Analyze the provided log patterns and provide insights.'
+                    },
+                    {
+                        'role': 'user',
+                        'content': prompt
+                    }
+                ],
+                'max_tokens': 1000,
+                'temperature': 0.1
+            }
+            
+            response = requests.post(
+                self.llm_endpoint,
+                headers=headers,
+                json=payload,
+                timeout=30
+            )
+            
+            if response.status_code == 200:
+                result = response.json()
+                return {
+                    'analysis': result.get('choices', [{}])[0].get('message', {}).get('content', ''),
+                    'timestamp': Utils.get_timestamp(),
+                    'model': self.llm_model
+                }
+            else:
+                self.logger.error(f"LLM API error: {response.status_code} - {response.text}")
+                return {"error": f"LLM API error: {response.status_code}"}
+                
+        except Exception as e:
+            self.logger.error(f"Error getting LLM analysis: {str(e)}")
+            return {"error": str(e)}
+    
+    def _update_base_patterns(self, new_patterns, comparison_results):
+        """Update base patterns with new patterns"""
+        try:
+            # Create updated base patterns
+            updated_base = new_patterns.copy()
+            updated_base['is_base_file'] = True
+            updated_base['updated_from_comparison'] = True
+            updated_base['update_timestamp'] = Utils.get_timestamp()
+            updated_base['update_reason'] = f"Updated due to {len(comparison_results['unmatched_patterns'])} unmatched patterns"
+            
+            # Save updated base
+            base_dir = Path(self.config['paths']['processed_base'])
+            base_file = base_dir / f"base_patterns_updated_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+            Utils.save_json(updated_base, base_file)
+            
+            self.logger.info(f"Base patterns updated: {base_file}")
+            
+            # Save update log
+            update_log = {
+                'timestamp': Utils.get_timestamp(),
+                'old_base': comparison_results['metadata']['base_file'],
+                'new_base': str(base_file),
+                'unmatched_patterns': list(comparison_results['unmatched_patterns'].keys()),
+                'reason': 'High number of unmatched patterns detected'
+            }
+            
+            reports_dir = Path(self.config['paths']['reports'])
+            update_file = reports_dir / f"base_update_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+            Utils.save_json(update_log, update_file)
+            
+        except Exception as e:
+            self.logger.error(f"Error updating base patterns: {str(e)}")
+
+def main():
+    """Main function for pattern comparison"""
+    comparer = CompareLogData()
+    
+    # Find latest pattern file
+    pattern_dir = Path("data/pattern_database/")
+    pattern_files = list(pattern_dir.glob("*_patterns_*.json"))
+    
+    if not pattern_files:
+        print("No pattern files found. Please run processlogloomdata.py first.")
+        return
+    
+    # Get the most recent non-base pattern file
+    latest_file = None
+    for file_path in sorted(pattern_files, reverse=True):
+        try:
+            pattern_data = Utils.load_json(file_path)
+            if not pattern_data.get('is_base_file', False):
+                latest_file = file_path
+                break
+        except:
+            continue
+    
+    if not latest_file:
+        print("No new pattern files found for comparison.")
+        return
+    
+    print(f"Comparing patterns from: {latest_file}")
+    
+    # Compare with base
+    results = comparer.compare_with_base(str(latest_file))
+    
+    if results:
+        print("\n" + "="*50)
+        print("COMPARISON RESULTS")
+        print("="*50)
+        
+        print(f"Matched Patterns: {len(results.get('matched_patterns', {}))}")
+        print(f"Unmatched Patterns: {len(results.get('unmatched_patterns', {}))}")
+        
+        if results.get('recommendations'):
+            print("\nRecommendations:")
+            for rec in results['recommendations']:
+                print(f"  - {rec}")
+        
+        if results.get('llm_analysis', {}).get('analysis'):
+            print("\nLLM Analysis:")
+            print(results['llm_analysis']['analysis'])
+    
+    print("\nComparison completed. Check results/ directory for detailed logs.")
+
+if __name__ == "__main__":
+    main()
+
+##displaymanager.py
+
+import json
+import pandas as pd
+from pathlib import Path
+from colorama import init, Fore, Back, Style
+from datetime import datetime
+import logging
+from src.utils import Utils
+
+# Initialize colorama
+init()
+
+class DisplayManager:
+    def __init__(self, config_path="config/config.yaml"):
+        self.config = Utils.load_config(config_path)
+        self.logger = logging.getLogger(__name__)
+    
+    def display_processing_summary(self, processed_df, patterns):
+        """Display processing summary in terminal"""
+        print(f"\n{Fore.CYAN}{'='*60}")
+        print(f"{Fore.CYAN}PROCESSING SUMMARY")
+        print(f"{Fore.CYAN}{'='*60}{Style.RESET_ALL}")
+        
+        print(f"{Fore.GREEN}✓ Total Records Processed: {len(processed_df)}")
+        print(f"{Fore.GREEN}✓ Error Types Found: {len(patterns)}")
+        print(f"{Fore.GREEN}✓ Processing Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        
+        # Display error type breakdown
+        if patterns:
+            print(f"\n{Fore.YELLOW}Error Type Breakdown:")
+            for error_type, data in patterns.items():
+                print(f"  {Fore.WHITE}• {error_type}: {data['count']} occurrences")
+                
+                # Show top error codes
+                if data['error_codes']:
+                    top_codes = list(data['error_codes'].items())[:3]
+                    for code, count in top_codes:
+                        print(f"    {Fore.CYAN}- {code}: {count} times")
+        
+        print(f"{Style.RESET_ALL}")
+    
+    def display_comparison_results(self, comparison_results):
+        """Display comparison results in terminal"""
+        print(f"\n{Fore.MAGENTA}{'='*60}")
+        print(f"{Fore.MAGENTA}PATTERN COMPARISON RESULTS")
+        print(f"{Fore.MAGENTA}{'='*60}{Style.RESET_ALL}")
+        
+        matched = comparison_results.get('matched_patterns', {})
+        unmatched = comparison_results.get('unmatched_patterns', {})
+        
+        print(f"{Fore.GREEN}✓ Matched Patterns: {len(matched)}")
+        print(f"{Fore.RED}⚠ Unmatched Patterns: {len(unmatched)}")
+        
+        # Display matched patterns
+        if matched:
+            print(f"\n{Fore.GREEN}MATCHED PATTERNS:")
+            for pattern_type, data in matched.items():
+                similarity = data.get('similarity', 0)
+                print(f"  {Fore.WHITE}• {pattern_type}: {similarity:.2f} similarity")
+        
+        # Display unmatched patterns
+        if unmatched:
+            print(f"\n{Fore.RED}UNMATCHED PATTERNS:")
+            for pattern_type, data in unmatched.items():
+                action = data.get('action', 'unknown')
+                print(f"  {Fore.WHITE}• {pattern_type}: {action}")
+                
+                if data.get('new_data'):
+                    count = data['new_data'].get('count', 0)
+                    print(f"    {Fore.CYAN}Count: {count}")
+        
+        # Display recommendations
+        recommendations = comparison_results.get('recommendations', [])
+        if recommendations:
+            print(f"\n{Fore.YELLOW}RECOMMENDATIONS:")
+            for rec in recommendations:
+                print(f"  {Fore.WHITE}• {rec}")
+        
+        # Display LLM analysis if available
+        llm_analysis = comparison_results.get('llm_analysis', {})
+        if llm_analysis.get('analysis'):
+            print(f"\n{Fore.BLUE}LLM ANALYSIS:")
+            print(f"{Fore.WHITE}{llm_analysis['analysis']}")
+        
+        print(f"{Style.RESET_ALL}")
+    
+    def display_file_status(self, directory_path, file_type="CSV"):
+        """Display file status in a directory"""
+        dir_path = Path(directory_path)
+        
+        if not dir_path.exists():
+            print(f"{Fore.RED}Directory not found: {directory_path}{Style.RESET_ALL}")
+            return
+        
+        files = list(dir_path.glob("*.csv" if file_type == "CSV" else "*.json"))
+        
+        print(f"\n{Fore.CYAN}{file_type} FILES in {directory_path}:")
+        if files:
+            for file_path in sorted(files):
+                file_size = file_path.stat().st_size
+                modified_time = datetime.fromtimestamp(file_path.stat().st_mtime)
+                print(f"  {Fore.WHITE}• {file_path.name}")
+                print(f"    {Fore.CYAN}Size: {file_size:,} bytes")
+                print(f"    {Fore.CYAN}Modified: {modified_time.strftime('%Y-%m-%d %H:%M:%S')}")
+        else:
+            print(f"  {Fore.YELLOW}No {file_type.lower()} files found")
+        
+        print(f"{Style.RESET_ALL}")
+    
+    def display_project_status(self):
+        """Display overall project status"""
+        print(f"\n{Fore.CYAN}{'='*60}")
+        print(f"{Fore.CYAN}SMARTLOGLOOMER PROJECT STATUS")
+        print(f"{Fore.CYAN}{'='*60}{Style.RESET_ALL}")
+        
+        # Check each directory
+        directories = [
+            ("Raw CSV Files", self.config['paths']['raw_csv']),
+            ("Processed Base", self.config['paths']['processed_base']),
+            ("Processed New", self.config['paths']['processed_new']),
+            ("Pattern Database", self.config['paths']['pattern_database']),
+            ("Comparison Logs", self.config['paths']['comparison_logs']),
+            ("Reports", self.config['paths']['reports'])
+        ]
+        
+        for name, path in directories:
+            dir_path = Path(path)
+            if dir_path.exists():
+                file_count = len(list(dir_path.glob("*")))
+                status = f"{Fore.GREEN}✓" if file_count > 0 else f"{Fore.YELLOW}○"
+                print(f"{status} {name}: {file_count} files")
+            else:
+                print(f"{Fore.RED}✗ {name}: Directory not found")
+        
+        print(f"{Style.RESET_ALL}")
+    
+    def create_summary_report(self, processing_results, comparison_results=None):
+        """Create a summary report in JSON format"""
+        report = {
+            'timestamp': Utils.get_timestamp(),
+            'processing_summary': {
+                'total_records': len(processing_results) if processing_results is not None else 0,
+                'error_types': processing_results['error_type'].nunique() if processing_results is not None else 0,
+                'top_errors': processing_results['error_type'].value_counts().head(5).to_dict() if processing_results is not None else {}
+            }
+        }
+        
+        if comparison_results:
+            report['comparison_summary'] = {
+                'matched_patterns': len(comparison_results.get('matched_patterns', {})),
+                'unmatched_patterns': len(comparison_results.get('unmatched_patterns', {})),
+                'recommendations_count': len(comparison_results.get('recommendations', [])),
+                'llm_analysis_available': bool(comparison_results.get('llm_analysis', {}).get('analysis'))
+            }
+        
+        # Save report
+        reports_dir = Path(self.config['paths']['reports'])
+        report_file = reports_dir / f"summary_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+        Utils.save_json(report, report_file)
+        
+        print(f"{Fore.GREEN}Summary report saved: {report_file}{Style.RESET_ALL}")
+        
+        return report
+
+def main():
+    """Display current project status"""
+    display_manager = DisplayManager()
+    display_manager.display_project_status()
+
+if __name__ == "__main__":
+    main()
+
+
+##main.py
+
+#!/usr/bin/env python3
+"""
+SmartLogLoomer - Main Entry Point
+Process and compare log data with pattern matching and LLM analysis
+"""
+
+import sys
+import argparse
+from pathlib import Path
+import logging
+from src.utils import Utils
+from src.processlogloomdata import ProcessLogLoomData
+from src.comparelogdata import CompareLogData
+from src.display_manager import DisplayManager
+
+def setup_project():
+    """Setup project directories and logging"""
+    # Load configuration
+    config = Utils.load_config()
+    
+    # Setup logging
+    logger = Utils.setup_logging(config.get('project', {}).get('log_level', 'INFO'))
+    
+    # Create directories
+    Utils.create_directories(config)
+    
+    return config, logger
+
+def process_command(args):
+    """Process CSV files"""
+    config, logger = setup_project()
+    
+    processor = ProcessLogLoomData()
+    display_manager = DisplayManager()
+    
+    # Check for CSV files
+    raw_csv_dir = Path("data/raw_csv/")
+    csv_files = list(raw_csv_dir.glob("*.csv"))
+    
+    if not csv_files:
+        print("❌ No CSV files found in data/raw_csv/ directory")
+        print("📁 Please place your CSV files in the data/raw_csv/ folder")
+        return
+    
+    print(f"🔍 Found {len(csv_files)} CSV file(s) to process")
+    
+    # Process each file
+    for csv_file in csv_files:
+        print(f"\n📊 Processing: {csv_file.name}")
+        
+        # Check if this should be a base file
+        processed_base_dir = Path("data/processed_base/")
+        is_base_file = len(list(processed_base_dir.glob("*.csv"))) == 0
+        
+        if is_base_file:
+            print("🏗️  Creating base patterns (first run)")
+        
+        # Process the file
+        result = processor.process_csv_file(str(csv_file), is_base_file)
+        
+        if result is not None:
+            print(f"✅ Successfully processed {csv_file.name}")
+            
+            # Extract patterns for display
+            patterns = processor._extract_patterns(result)
+            display_manager.display_processing_summary(result, patterns)
+        else:
+            print(f"❌ Failed to process {csv_file.name}")
+    
+    print("\n🎉 Processing completed!")
+
+def compare_command(args):
+    """Compare patterns with base"""
+    config, logger = setup_project()
+    
+    comparer = CompareLogData()
+    display_manager = DisplayManager()
+    
+    # Find pattern files
+    pattern_dir = Path("data/pattern_database/")
+    pattern_files = list(pattern_dir.glob("*_patterns_*.json"))
+    
+    if not pattern_files:
+        print("❌ No pattern files found.")
+        print("💡 Please run 'python main.py process' first to create pattern files.")
+        return
+    
+    # Find latest non-base pattern file
+    latest_file = None
+    for file_path in sorted(pattern_files, reverse=True):
+        try:
+            pattern_data = Utils.load_json(file_path)
+            if not pattern_data.get('is_base_file', False):
+                latest_file = file_path
+                break
+        except:
+            continue
+    
+    if not latest_file:
+        print("❌ No new pattern files found for comparison.")
+        print("💡 All existing patterns are base files.")
+        return
+    
+    print(f"🔄 Comparing patterns from: {latest_file.name}")
+    
+    # Perform comparison
+    results = comparer.compare_with_base(str(latest_file))
+    
+    if results:
+        display_manager.display_comparison_results(results)
+        
+        # Create summary report
+        display_manager.create_summary_report(None, results)
+    else:
+        print("❌ Comparison failed.")
+    
+    print("\n🎉 Comparison completed!")
+
+def status_command(args):
+    """Display project status"""
+    config, logger = setup_project()
+    display_manager = DisplayManager()
+    
+    display_manager.display_project_status()
+    
+    # Show file details for each directory
+    directories = [
+        ("data/raw_csv/", "CSV"),
+        ("data/processed_base/", "CSV"),
+        ("data/processed_new/", "CSV"),
+        ("data/pattern_database/", "JSON"),
+        ("results/comparison_logs/", "JSON")
+    ]
+    
+    for directory, file_type in directories:
+        display_manager.display_file_status(directory, file_type)
+
+def main():
+    """Main entry point"""
+    parser = argparse.ArgumentParser(
+        description="SmartLogLoomer - Log Processing and Pattern Analysis Tool",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  python main.py process          # Process CSV files in data/raw_csv/
+  python main.py compare          # Compare latest patterns with base
+  python main.py status           # Show project status
+  python main.py process --help   # Show help for process command
+        """
+    )
+    
+    subparsers = parser.add_subparsers(dest='command', help='Available commands')
+    
+    # Process command
+    process_parser = subparsers.add_parser('process', help='Process CSV files')
+    process_parser.set_defaults(func=process_command)
+    
+    # Compare command
+    compare_parser = subparsers.add_parser('compare', help='Compare patterns with base')
+    compare_parser.set_defaults(func=compare_command)
+    
+    # Status command
+    status_parser = subparsers.add_parser('status', help='Show project status')
+    status_parser.set_defaults(func=status_command)
+    
+    # Parse arguments
+    args = parser.parse_args()
+    
+    if not args.command:
+        parser.print_help()
+        return
+    
+    try:
+        args.func(args)
+    except KeyboardInterrupt:
+        print("\n⚠️  Operation cancelled by user")
+        sys.exit(1)
+    except Exception as e:
+        print(f"❌ Error: {str(e)}")
+        sys.exit(1)
+
+if __name__ == "__main__":
+    main()
+
+
+
+
+we are developin this project in pycharm 2024 with python 3.7 version.
+
+
+We are devloping the smartlogloomer project
+
+we will take data from logloom.py where this file will get us the csv files (excel files) from this but we are not developing this file. right now we will take it from normal csv files 
+
+first file name processlogloomdata.py where this file will have process the data where we take csv files from logloom.py but right now write the code we take files of csv where i will give it and upload in my project folder and comment the command how to get from logloom.py.
+
+the file1 processlogloomdata.py must needs to be have process the data from csv file which has accountnumber, workingsession, proposal,uan, operation_name,outerMessage( this is the important part),operation_id from csv file we give or get generated. In the same file can you process this outerMessage column where this column has 404, some url links in that and other type of data in that particular column only and we need to divide them store them in new csv file with other columns asscoaited with it. 
+
+Next store this data with the new folder whiuch has processed cvs data(base file for comparison). first time we will develop this csv file and store this. from next time when we get new csv file with same data we will just process same like what we did above and store these type of files in different folder.. Here cleaning must me done in good format i will attach the what are the columns and what data will be there in that. 
+
+
+the file2 will do the comparelogdata.py with the base file and new files everytime we feed or give the files will be csv files right now. You need to give me idea here we will compare in a way that we will develop a pattern here like if these two files like one base fixed with the newly processed file must have the some common things related to error in outer message we need to ignore them and must save some logs how you compared them. If pattern is not found we need to update the base file first (CSV) for preventing next coming csv files matching and store the what different pattern we got and store it in seperate csv file under some folder. 
+
+We need to do the patternmatching with above concept and feed some sql error's like 404, 913 somehting , i will attach the photo. We will feed the comparision and these sql commands understanding to LLM model we have llama meta model i will give the modelname and end point.
+
+
+Setup .env file and requiremrnt file for these. 
+
+
+llama-4-scout-instruct
+https://chat.copdev.azpriv-cloud.ubs.net/api/v1/chat/completions
+
+
+
+smartlogloomer/
+├── data/
+│   ├── raw_csv/                    # Input CSV files
+│   ├── processed_base/             # Base patterns (first run)
+│   ├── processed_new/              # New processed files  
+│   └── pattern_database/           # Pattern storage & metadata
+├── results/
+│   ├── comparison_logs/            # JSON logs of comparisons
+│   ├── matched_patterns/           # Patterns that matched base
+│   ├── unmatched_patterns/         # New patterns to analyze
+│   └── reports/                    # Summary reports
+├── frontend/                       # Web interface (optional)
+├── src/
+│   ├── processlogloomdata.py       # CSV processing & pattern extraction
+│   ├── comparelogdata.py           # Pattern comparison logic
+│   ├── pattern_matcher.py          # Core matching algorithms
+│   ├── display_manager.py          # Terminal display & JSON output
+│   └── utils.py                    # Utility functions
+├── config/
+│   ├── config.yaml                 # Configuration
+│   └── sql_error_codes.yaml        # Known SQL errors
+└── logs/                           # Application logs
