@@ -1,837 +1,97 @@
-#core.py
+What’s New In Python 3.13
+Editors:
+Adam Turner and Thomas Wouters
 
+This article explains the new features in Python 3.13, compared to 3.12. Python 3.13 was released on October 7, 2024. For full details, see the changelog.
 
-# core.py - Fixed SSL and API connection issues
+See also PEP 719 – Python 3.13 Release Schedule
+Summary – Release Highlights
+Python 3.13 is the latest stable release of the Python programming language, with a mix of changes to the language, the implementation and the standard library. The biggest changes include a new interactive interpreter, experimental support for running in a free-threaded mode (PEP 703), and a Just-In-Time compiler (PEP 744).
 
-import requests
-import base64
-import json
-import urllib3
-from urllib.parse import urlparse
-from config import GITLAB_TOKEN, LLAMA_API_KEY
+Error messages continue to improve, with tracebacks now highlighted in color by default. The locals() builtin now has defined semantics for changing the returned mapping, and type parameters now support default values.
 
-# Disable SSL warnings if we're going to disable verification
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+The library changes contain removal of deprecated APIs and modules, as well as the usual improvements in user-friendliness and correctness. Several legacy standard library modules have now been removed following their deprecation in Python 3.11 (PEP 594).
 
-class GitLabClient:
-    def __init__(self, token, verify_ssl=False):  # Default to False for self-signed certs
-        self.token = token
-        self.headers = {"PRIVATE-TOKEN": token}
-        self.verify_ssl = verify_ssl
-        
-        # Configure session for better SSL handling
-        self.session = requests.Session()
-        self.session.headers.update(self.headers)
-        self.session.verify = verify_ssl
-        
-        # Add timeout and retry logic
-        from requests.adapters import HTTPAdapter
-        from urllib3.util.retry import Retry
-        
-        retry_strategy = Retry(
-            total=3,
-            backoff_factor=1,
-            status_forcelist=[429, 500, 502, 503, 504],
-        )
-        adapter = HTTPAdapter(max_retries=retry_strategy)
-        self.session.mount("http://", adapter)
-        self.session.mount("https://", adapter)
-        
-    def get_project_info(self, repo_url):
-        """Extract project info from GitLab URL"""
-        try:
-            parsed = urlparse(repo_url)
-            gitlab_host = f"{parsed.scheme}://{parsed.netloc}"
-            project_path = parsed.path.strip('/').replace('.git', '')
-            
-            # Get project ID - try different URL encoding approaches
-            encoded_path = requests.utils.quote(project_path, safe='')
-            api_url = f"{gitlab_host}/api/v4/projects/{encoded_path}"
-            
-            print(f"Connecting to: {api_url}")  # Debug info
-            print(f"SSL Verification: {self.verify_ssl}")
-            
-            response = self.session.get(api_url, timeout=30)
-            response.raise_for_status()
-            return response.json(), gitlab_host
-            
-        except requests.exceptions.SSLError as e:
-            print(f"SSL Error: {e}")
-            print("Retrying with SSL verification disabled...")
-            self.session.verify = False
-            try:
-                response = self.session.get(api_url, timeout=30)
-                response.raise_for_status()
-                return response.json(), gitlab_host
-            except Exception as retry_e:
-                raise Exception(f"Failed to fetch project info even without SSL verification: {str(retry_e)}")
-        except requests.exceptions.ConnectionError as e:
-            raise Exception(f"Connection error - check your network and GitLab URL: {str(e)}")
-        except requests.exceptions.Timeout as e:
-            raise Exception(f"Request timeout - GitLab server may be slow: {str(e)}")
-        except requests.exceptions.HTTPError as e:
-            if response.status_code == 401:
-                raise Exception("Authentication failed - check your GitLab token")
-            elif response.status_code == 404:
-                raise Exception("Repository not found - check the URL and access permissions")
-            else:
-                raise Exception(f"HTTP {response.status_code}: {response.reason}")
-        except Exception as e:
-            raise Exception(f"Failed to fetch project info: {str(e)}")
-    
-    def get_repository_tree(self, gitlab_host, project_id):
-        """Get repository file tree"""
-        try:
-            api_url = f"{gitlab_host}/api/v4/projects/{project_id}/repository/tree"
-            params = {"recursive": True, "per_page": 100}
-            
-            all_files = []
-            page = 1
-            
-            while True:
-                params["page"] = page
-                response = self.session.get(api_url, params=params, timeout=30)
-                response.raise_for_status()
-                
-                files = response.json()
-                if not files:
-                    break
-                    
-                all_files.extend([f for f in files if f['type'] == 'blob'])
-                page += 1
-                
-                if len(files) < 100:  # Last page
-                    break
-                    
-                # Safety limit to prevent infinite loops
-                if page > 50:
-                    print("Warning: Stopped at page 50 to prevent excessive requests")
-                    break
-            
-            return all_files
-            
-        except Exception as e:
-            raise Exception(f"Failed to fetch repository tree: {str(e)}")
-    
-    def get_file_content(self, gitlab_host, project_id, file_path):
-        """Get content of a specific file"""
-        try:
-            encoded_path = requests.utils.quote(file_path, safe='')
-            api_url = f"{gitlab_host}/api/v4/projects/{project_id}/repository/files/{encoded_path}"
-            
-            # Try main branch first, then master
-            for branch in ["main", "master", "develop"]:
-                params = {"ref": branch}
-                response = self.session.get(api_url, params=params, timeout=30)
-                
-                if response.status_code == 200:
-                    file_data = response.json()
-                    # Decode base64 content
-                    try:
-                        content = base64.b64decode(file_data['content']).decode('utf-8')
-                        return content
-                    except UnicodeDecodeError:
-                        # Try with different encoding for binary files
-                        try:
-                            content = base64.b64decode(file_data['content']).decode('latin1')
-                            return f"[Binary file content - {len(content)} bytes]"
-                        except:
-                            return f"[Unable to decode file content]"
-                elif response.status_code != 404:
-                    response.raise_for_status()
-            
-            return f"File not found in any branch: {file_path}"
-            
-        except Exception as e:
-            return f"Error reading file {file_path}: {str(e)}"
+This article doesn’t attempt to provide a complete specification of all new features, but instead gives a convenient overview. For full details refer to the documentation, such as the Library Reference and Language Reference. To understand the complete implementation and design rationale for a change, refer to the PEP for a particular new feature; but note that PEPs usually are not kept up-to-date once a feature has been fully implemented. See Porting to Python 3.13 for guidance on upgrading from earlier versions of Python.
 
-class CodeProcessor:
-    def __init__(self):
-        self.supported_extensions = ['.py', '.js', '.java', '.cpp', '.c', '.h', '.md', '.txt', '.yml', '.yaml', '.json', '.xml', '.html', '.css', '.rb', '.go', '.rs', '.php', '.ts', '.jsx', '.tsx']
-    
-    def filter_files(self, files):
-        """Filter files by supported extensions"""
-        filtered = []
-        for file_info in files:
-            file_path = file_info['path']
-            if any(file_path.endswith(ext) for ext in self.supported_extensions):
-                if not self._should_skip_file(file_path):
-                    filtered.append(file_info)
-        return filtered
-    
-    def _should_skip_file(self, file_path):
-        """Skip certain files/directories"""
-        skip_patterns = [
-            'node_modules/', '.git/', '__pycache__/', '.venv/', 'venv/',
-            '.idea/', '.vscode/', 'dist/', 'build/', 'target/', 'vendor/',
-            '.next/', '.nuxt/', 'coverage/', '.nyc_output/'
-        ]
-        return any(pattern in file_path for pattern in skip_patterns)
-    
-    def chunk_content(self, files_content, max_chunk_size=4000):
-        """Split content into chunks for LLaMA processing"""
-        chunks = []
-        current_chunk = ""
-        current_files = []
-        
-        for file_path, content in files_content.items():
-            file_section = f"\n\n=== FILE: {file_path} ===\n{content}\n"
-            
-            if len(current_chunk + file_section) > max_chunk_size:
-                if current_chunk:
-                    chunks.append({
-                        'content': current_chunk,
-                        'files': current_files.copy()
-                    })
-                current_chunk = file_section
-                current_files = [file_path]
-            else:
-                current_chunk += file_section
-                current_files.append(file_path)
-        
-        if current_chunk:
-            chunks.append({
-                'content': current_chunk,
-                'files': current_files
-            })
-        
-        return chunks
+Interpreter improvements:
 
-class LlamaClient:
-    def __init__(self, api_key):
-        self.api_key = api_key
-        self.base_url = "https://api.groq.com/openai/v1/chat/completions"
-        
-        # Test API connection first
-        print("Testing Groq API connection...")
-        self._test_api_connection()
-        
-        # Get available models
-        self.available_models = self._get_available_models()
-        print(f"Available models: {self.available_models}")
-    
-    def _test_api_connection(self):
-        """Test basic API connectivity"""
-        try:
-            headers = {
-                "Authorization": f"Bearer {self.api_key}",
-                "Content-Type": "application/json"
-            }
-            
-            # Simple test request
-            test_url = "https://api.groq.com/openai/v1/models"
-            print(f"Testing connection to: {test_url}")
-            
-            response = requests.get(test_url, headers=headers, timeout=10)
-            print(f"API test response status: {response.status_code}")
-            
-            if response.status_code == 401:
-                raise Exception("Invalid API key - check your LLAMA_API_KEY")
-            elif response.status_code == 403:
-                raise Exception("API access forbidden - check your Groq account status")
-            elif response.status_code != 200:
-                raise Exception(f"API test failed with status {response.status_code}: {response.text}")
-            
-            print("✓ Groq API connection successful")
-            
-        except requests.exceptions.ConnectionError as e:
-            raise Exception(f"Cannot connect to Groq API - check your internet connection: {str(e)}")
-        except requests.exceptions.Timeout as e:
-            raise Exception(f"Groq API connection timeout: {str(e)}")
-        except Exception as e:
-            raise Exception(f"Groq API test failed: {str(e)}")
-    
-    def _get_available_models(self):
-        """Get list of available models from Groq API"""
-        try:
-            headers = {
-                "Authorization": f"Bearer {self.api_key}",
-                "Content-Type": "application/json"
-            }
-            
-            models_url = "https://api.groq.com/openai/v1/models"
-            response = requests.get(models_url, headers=headers, timeout=30)
-            response.raise_for_status()
-            
-            models_data = response.json()
-            model_ids = [model['id'] for model in models_data.get('data', [])]
-            return model_ids
-            
-        except Exception as e:
-            print(f"Error fetching available models: {e}")
-            # Return updated Groq model names as fallback
-            return [
-                "llama-3.1-70b-versatile",
-                "llama-3.1-8b-instant", 
-                "llama-3.2-90b-text-preview",
-                "llama-3.2-11b-text-preview",
-                "llama3-70b-8192",
-                "llama3-8b-8192",
-                "mixtral-8x7b-32768",
-                "gemma-7b-it",
-                "gemma2-9b-it"
-            ]
-    
-    def _select_best_model(self):
-        """Select the best available model"""
-        # Updated preferred models (llama4-scout-instruct is not a valid Groq model)
-        preferred_models = [
-            "llama-3.2-90b-text-preview",  # Latest large model
-            "llama-3.1-70b-versatile",     # Most capable stable model
-            "llama-3.2-11b-text-preview",  # Good balance
-            "llama-3.1-8b-instant",        # Fast and efficient
-            "llama3-70b-8192",             # Fallback large model
-            "llama3-8b-8192",              # Fallback small model
-            "mixtral-8x7b-32768",          # Alternative
-            "gemma2-9b-it",                # Another alternative
-            "gemma-7b-it"                  # Last resort
-        ]
-        
-        for model in preferred_models:
-            if model in self.available_models:
-                print(f"✓ Selected model: {model}")
-                return model
-        
-        # If none of the preferred models are available, use the first available
-        if self.available_models:
-            model = self.available_models[0]
-            print(f"Using first available model: {model}")
-            return model
-        
-        # Last resort fallback
-        print("Warning: No models detected, using fallback: llama3-8b-8192")
-        return "llama3-8b-8192"
-    
-    def generate_documentation(self, code_chunk, project_name=""):
-        """Generate documentation for code chunk using LLaMA"""
-        model = self._select_best_model()
-        
-        prompt = f"""You are an expert technical documentation generator. Analyze the provided code and generate comprehensive documentation.
+A greatly improved interactive interpreter and improved error messages.
 
-Project: {project_name}
-Files included: {', '.join(code_chunk['files'])}
+PEP 667: The locals() builtin now has defined semantics when mutating the returned mapping. Python debuggers and similar tools may now more reliably update local variables in optimized scopes even during concurrent code execution.
 
-Code Content:
-{code_chunk['content']}
+PEP 703: CPython 3.13 has experimental support for running with the global interpreter lock disabled. See Free-threaded CPython for more details.
 
-Generate detailed documentation that includes:
-1. **Overview**: Brief description of what these files do
-2. **Key Components**: Main classes, functions, and their purposes  
-3. **Dependencies**: External libraries and frameworks used
-4. **Code Structure**: How the code is organized
-5. **Technical Details**: Important implementation details
+PEP 744: A basic JIT compiler was added. It is currently disabled by default (though we may turn it on later). Performance improvements are modest – we expect to improve this over the next few releases.
 
-Format the response in clear markdown with proper headers and code examples where relevant."""
+Color support in the new interactive interpreter, as well as in tracebacks and doctest output. This can be disabled through the PYTHON_COLORS and NO_COLOR environment variables.
 
-        headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json"
-        }
-        
-        payload = {
-            "model": model,
-            "messages": [
-                {"role": "user", "content": prompt}
-            ],
-            "max_tokens": 2000,
-            "temperature": 0.3
-        }
-        
-        try:
-            print(f"Making API request to {self.base_url} with model {model}")
-            response = requests.post(self.base_url, headers=headers, json=payload, timeout=60)
-            
-            # Print response details for debugging
-            print(f"Response status: {response.status_code}")
-            if response.status_code != 200:
-                print(f"Response headers: {dict(response.headers)}")
-                print(f"Response text: {response.text}")
-            
-            response.raise_for_status()
-            
-            result = response.json()
-            return result["choices"][0]["message"]["content"]
-            
-        except requests.exceptions.HTTPError as e:
-            if response.status_code == 401:
-                return f"Authentication Error: Invalid API key. Please check your LLAMA_API_KEY in the .env file."
-            elif response.status_code == 429:
-                return f"Rate Limit Error: Too many requests. Please try again later."
-            elif response.status_code == 400:
-                error_details = ""
-                try:
-                    error_json = response.json()
-                    error_details = f": {error_json.get('error', {}).get('message', response.text)}"
-                except:
-                    error_details = f": {response.text}"
-                return f"Bad Request{error_details}. The model '{model}' might not be available or the request format is incorrect."
-            else:
-                return f"HTTP Error {response.status_code}: {response.text}"
-        except requests.exceptions.ConnectionError as e:
-            return f"Connection Error: Unable to connect to Groq API. Check your internet connection. Details: {str(e)}"
-        except requests.exceptions.Timeout as e:
-            return f"Timeout Error: Request took too long. Try again."
-        except Exception as e:
-            return f"Error generating documentation: {str(e)}"
-    
-    def generate_project_overview(self, project_info, all_files):
-        """Generate overall project documentation"""
-        model = self._select_best_model()
-        
-        files_list = "\n".join([f"- {f}" for f in all_files[:20]])  # Limit to first 20 files
-        if len(all_files) > 20:
-            files_list += f"\n... and {len(all_files) - 20} more files"
-        
-        prompt = f"""Generate a comprehensive project README for this GitLab repository:
+Python data model improvements:
 
-Project Name: {project_info.get('name', 'Unknown')}
-Description: {project_info.get('description', 'No description provided')}
-Default Branch: {project_info.get('default_branch', 'main')}
+__static_attributes__ stores the names of attributes accessed through self.X in any function in a class body.
 
-Files in repository:
-{files_list}
+__firstlineno__ records the first line number of a class definition.
 
-Create a professional README that includes:
-1. **Project Title and Description**
-2. **Architecture Overview** 
-3. **Technology Stack**
-4. **Installation Instructions**
-5. **Usage Guide**
-6. **File Structure Explanation**
-7. **Contributing Guidelines**
+Significant improvements in the standard library:
 
-Make it comprehensive and suitable for both developers and stakeholders."""
+Add a new PythonFinalizationError exception, raised when an operation is blocked during finalization.
 
-        headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json"
-        }
-        
-        payload = {
-            "model": model,
-            "messages": [
-                {"role": "user", "content": prompt}
-            ],
-            "max_tokens": 3000,
-            "temperature": 0.2
-        }
-        
-        try:
-            print(f"Making project overview API request with model {model}")
-            response = requests.post(self.base_url, headers=headers, json=payload, timeout=60)
-            
-            print(f"Project overview response status: {response.status_code}")
-            if response.status_code != 200:
-                print(f"Project overview response text: {response.text}")
-            
-            response.raise_for_status()
-            
-            result = response.json()
-            return result["choices"][0]["message"]["content"]
-            
-        except Exception as e:
-            return f"Error generating project overview: {str(e)}"
+The argparse module now supports deprecating command-line options, positional arguments, and subcommands.
 
-class DocumentationGenerator:
-    def __init__(self, verify_ssl=False):  # Default to False for self-signed certs
-        self.gitlab_client = GitLabClient(GITLAB_TOKEN, verify_ssl=verify_ssl)
-        self.code_processor = CodeProcessor()
-        self.llama_client = LlamaClient(LLAMA_API_KEY)
-    
-    def generate_documentation(self, repo_url, status_callback=None):
-        """Main function to generate complete documentation"""
-        try:
-            # Step 1: Get project info
-            if status_callback:
-                status_callback("Connecting to GitLab...")
-            project_info, gitlab_host = self.gitlab_client.get_project_info(repo_url)
-            project_id = project_info['id']
-            
-            # Step 2: Get repository files
-            if status_callback:
-                status_callback("Fetching repository structure...")
-            all_files = self.gitlab_client.get_repository_tree(gitlab_host, project_id)
-            
-            # Step 3: Filter and process files
-            if status_callback:
-                status_callback("Processing code files...")
-            filtered_files = self.code_processor.filter_files(all_files)
-            
-            # Step 4: Get file contents
-            if status_callback:
-                status_callback("Reading file contents...")
-            files_content = {}
-            max_files = min(15, len(filtered_files))  # Limit to 15 files for demo
-            
-            for i, file_info in enumerate(filtered_files[:max_files]):
-                if status_callback:
-                    status_callback(f"Reading file {i+1}/{max_files}: {file_info['path']}")
-                content = self.gitlab_client.get_file_content(gitlab_host, project_id, file_info['path'])
-                if not content.startswith("Error reading") and not content.startswith("File not found"):
-                    files_content[file_info['path']] = content
-            
-            if not files_content:
-                raise Exception("No readable files found in the repository")
-            
-            # Step 5: Generate project overview
-            if status_callback:
-                status_callback("Generating project overview...")
-            project_overview = self.llama_client.generate_project_overview(
-                project_info, list(files_content.keys())
-            )
-            
-            # Step 6: Process code chunks
-            if status_callback:
-                status_callback("Processing code for AI analysis...")
-            chunks = self.code_processor.chunk_content(files_content)
-            
-            # Step 7: Generate documentation for each chunk
-            documentation_parts = [project_overview]
-            
-            for i, chunk in enumerate(chunks):
-                if status_callback:
-                    status_callback(f"Generating documentation for chunk {i+1}/{len(chunks)}...")
-                chunk_doc = self.llama_client.generate_documentation(chunk, project_info.get('name', ''))
-                documentation_parts.append(f"\n\n## Code Analysis - Part {i+1}\n\n{chunk_doc}")
-            
-            # Step 8: Combine all documentation
-            if status_callback:
-                status_callback("Finalizing documentation...")
-            
-            final_documentation = "\n\n".join(documentation_parts)
-            
-            # Add metadata footer
-            final_documentation += f"\n\n---\n*Documentation generated automatically from GitLab repository: {repo_url}*"
-            final_documentation += f"\n*Files processed: {len(files_content)}*"
-            final_documentation += f"\n*Generated on: {project_info.get('last_activity_at', 'Unknown')}*"
-            
-            return final_documentation
-            
-        except Exception as e:
-            raise Exception(f"Documentation generation failed: {str(e)}")
+The new functions base64.z85encode() and base64.z85decode() support encoding and decoding Z85 data.
 
-#main.py
+The copy module now has a copy.replace() function, with support for many builtin types and any class defining the __replace__() method.
 
-# Updated main.py with SSL configuration option
+The new dbm.sqlite3 module is now the default dbm backend.
 
-import tkinter as tk
-from tkinter import messagebox, scrolledtext, filedialog, ttk
-import threading
-from core import DocumentationGenerator
+The os module has a suite of new functions for working with Linux’s timer notification file descriptors.
 
-class App(tk.Tk):
-    def __init__(self):
-        super().__init__()
-        self.title("GitLab AI Documentation Generator")
-        self.geometry("950x750")
-        self.resizable(True, True)
-        
-        self.doc_generator = None
-        self.setup_ui()
-        
-    def setup_ui(self):
-        # Main frame
-        main_frame = tk.Frame(self, padx=20, pady=20)
-        main_frame.pack(fill=tk.BOTH, expand=True)
-        
-        # Title
-        title_label = tk.Label(main_frame, text="GitLab AI Documentation Generator", 
-                              font=("Arial", 16, "bold"))
-        title_label.pack(pady=(0, 20))
-        
-        # URL input section
-        url_frame = tk.Frame(main_frame)
-        url_frame.pack(fill=tk.X, pady=(0, 10))
-        
-        self.url_label = tk.Label(url_frame, text="GitLab Repository URL:", font=("Arial", 10))
-        self.url_label.pack(anchor=tk.W)
-        
-        self.url_entry = tk.Entry(url_frame, width=80, font=("Arial", 10))
-        self.url_entry.pack(fill=tk.X, pady=(5, 0))
-        
-        # SSL Configuration section
-        ssl_frame = tk.Frame(main_frame)
-        ssl_frame.pack(fill=tk.X, pady=(5, 10))
-        
-        self.ssl_var = tk.BooleanVar(value=True)
-        self.ssl_checkbox = tk.Checkbutton(ssl_frame, text="Verify SSL Certificates (uncheck if getting SSL errors)", 
-                                         variable=self.ssl_var, font=("Arial", 9))
-        self.ssl_checkbox.pack(anchor=tk.W)
-        
-        # Info label
-        info_label = tk.Label(ssl_frame, text="Note: If you get SSL certificate errors, try unchecking the SSL verification option above.", 
-                             font=("Arial", 8), fg="gray")
-        info_label.pack(anchor=tk.W, pady=(2, 0))
-        
-        # Buttons frame
-        button_frame = tk.Frame(main_frame)
-        button_frame.pack(fill=tk.X, pady=10)
-        
-        self.generate_button = tk.Button(button_frame, text="Generate Documentation", 
-                                       command=self.start_generation, bg="#4CAF50", 
-                                       fg="white", font=("Arial", 10, "bold"))
-        self.generate_button.pack(side=tk.LEFT, padx=(0, 10))
-        
-        self.save_button = tk.Button(button_frame, text="Save Documentation", 
-                                   command=self.save_documentation, state=tk.DISABLED,
-                                   bg="#2196F3", fg="white", font=("Arial", 10))
-        self.save_button.pack(side=tk.LEFT, padx=(0, 10))
-        
-        self.clear_button = tk.Button(button_frame, text="Clear Output", 
-                                    command=self.clear_output, bg="#FF9800", 
-                                    fg="white", font=("Arial", 10))
-        self.clear_button.pack(side=tk.LEFT)
-        
-        # Status section
-        status_frame = tk.Frame(main_frame)
-        status_frame.pack(fill=tk.X, pady=(10, 5))
-        
-        self.status_label = tk.Label(status_frame, text="Status: Ready", 
-                                   font=("Arial", 10), fg="green")
-        self.status_label.pack(anchor=tk.W)
-        
-        # Progress bar
-        self.progress_var = tk.StringVar()
-        self.progress_label = tk.Label(status_frame, textvariable=self.progress_var, 
-                                     font=("Arial", 9), fg="blue")
-        self.progress_label.pack(anchor=tk.W)
-        
-        # Add progress bar widget
-        self.progress_bar = ttk.Progressbar(status_frame, mode='indeterminate')
-        self.progress_bar.pack(fill=tk.X, pady=(5, 0))
-        
-        # Documentation output
-        output_label = tk.Label(main_frame, text="Generated Documentation:", 
-                              font=("Arial", 10, "bold"))
-        output_label.pack(anchor=tk.W, pady=(20, 5))
-        
-        self.text_area = scrolledtext.ScrolledText(main_frame, wrap=tk.WORD, 
-                                                 font=("Consolas", 9), height=25)
-        self.text_area.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
-        
-    def start_generation(self):
-        repo_url = self.url_entry.get().strip()
-        if not repo_url:
-            messagebox.showerror("Error", "Please enter a GitLab repository URL.")
-            return
-        
-        # Validate URL format
-        if not (repo_url.startswith('http://') or repo_url.startswith('https://')):
-            messagebox.showerror("Error", "Please enter a valid URL starting with http:// or https://")
-            return
-            
-        self.generate_button.config(state=tk.DISABLED)
-        self.save_button.config(state=tk.DISABLED)
-        self.text_area.delete(1.0, tk.END)
-        self.progress_bar.start()
-        
-        # Initialize doc generator with SSL setting
-        verify_ssl = self.ssl_var.get()
-        self.doc_generator = DocumentationGenerator(verify_ssl=verify_ssl)
-        
-        # Start generation in separate thread
-        thread = threading.Thread(target=self.generate_docs, args=(repo_url,))
-        thread.daemon = True
-        thread.start()
-        
-    def generate_docs(self, repo_url):
-        try:
-            def update_status(message):
-                self.after(0, lambda: self.status_label.config(text=f"Status: {message}"))
-                self.after(0, lambda: self.progress_var.set(f"● {message}"))
-            
-            update_status("Starting documentation generation...")
-            documentation = self.doc_generator.generate_documentation(repo_url, update_status)
-            
-            self.after(0, lambda: self.text_area.insert(tk.END, documentation))
-            self.after(0, lambda: self.status_label.config(text="Status: Documentation generated successfully!", fg="green"))
-            self.after(0, lambda: self.progress_var.set("✓ Complete"))
-            self.after(0, lambda: self.save_button.config(state=tk.NORMAL))
-            
-        except Exception as e:
-            error_msg = str(e)
-            self.after(0, lambda: messagebox.showerror("Error", f"Failed to generate documentation:\n\n{error_msg}"))
-            self.after(0, lambda: self.status_label.config(text="Status: Error occurred", fg="red"))
-            self.after(0, lambda: self.progress_var.set("✗ Failed"))
-            
-            # Add helpful SSL error message
-            if "SSL" in error_msg or "certificate" in error_msg.lower():
-                self.after(0, lambda: messagebox.showinfo("SSL Help", 
-                    "SSL certificate error detected!\n\n"
-                    "Try the following:\n"
-                    "1. Uncheck 'Verify SSL Certificates' option\n"
-                    "2. Check if the GitLab URL is correct\n"
-                    "3. Verify your network connection\n"
-                    "4. Check if you need to be on VPN"))
-        finally:
-            self.after(0, lambda: self.generate_button.config(state=tk.NORMAL))
-            self.after(0, lambda: self.progress_bar.stop())
-    
-    def save_documentation(self):
-        content = self.text_area.get(1.0, tk.END)
-        if not content.strip():
-            messagebox.showwarning("Warning", "No documentation to save.")
-            return
-            
-        file_path = filedialog.asksaveasfilename(
-            defaultextension=".md",
-            filetypes=[("Markdown files", "*.md"), ("Text files", "*.txt"), ("All files", "*.*")]
-        )
-        
-        if file_path:
-            try:
-                with open(file_path, 'w', encoding='utf-8') as f:
-                    f.write(content)
-                messagebox.showinfo("Success", f"Documentation saved to {file_path}")
-            except Exception as e:
-                messagebox.showerror("Error", f"Failed to save file: {str(e)}")
-    
-    def clear_output(self):
-        self.text_area.delete(1.0, tk.END)
-        self.status_label.config(text="Status: Ready", fg="green")
-        self.progress_var.set("")
-        self.save_button.config(state=tk.DISABLED)
+The random module now has a command-line interface.
 
-if __name__ == '__main__':
-    app = App()
-    app.mainloop()
-#config.py
+Security improvements:
 
-import os
-from dotenv import load_dotenv
+ssl.create_default_context() sets ssl.VERIFY_X509_PARTIAL_CHAIN and ssl.VERIFY_X509_STRICT as default flags.
 
-# Load environment variables from .env file
-load_dotenv()
+C API improvements:
 
-# GitLab Configuration
-GITLAB_TOKEN = os.getenv("GITLAB_TOKEN")
-if not GITLAB_TOKEN:
-    raise ValueError("GITLAB_TOKEN not found in environment variables. Please add it to your .env file.")
+The Py_mod_gil slot is now used to indicate that an extension module supports running with the GIL disabled.
 
-# LLaMA API Configuration  
-LLAMA_API_KEY = os.getenv("LLAMA_API_KEY")
-if not LLAMA_API_KEY:
-    raise ValueError("LLAMA_API_KEY not found in environment variables. Please add it to your .env file.")
+The PyTime C API has been added, providing access to system clocks.
 
-# Azure Configuration (Optional - for future use)
-AZURE_STORAGE_CONNECTION_STRING = os.getenv("AZURE_STORAGE_CONNECTION_STRING")
-AZURE_COSMOS_CONNECTION_STRING = os.getenv("AZURE_COSMOS_CONNECTION_STRING")
+PyMutex is a new lightweight mutex that occupies a single byte.
 
-# Application Settings
-MAX_FILES_TO_PROCESS = 15  # Limit number of files to process
-MAX_CHUNK_SIZE = 4000      # Maximum characters per chunk for LLaMA
+There is a new suite of functions for generating PEP 669 monitoring events in the C API.
 
-#azure storage 
+New typing features:
 
-import os
-from datetime import datetime
-from config import AZURE_STORAGE_CONNECTION_STRING, AZURE_COSMOS_CONNECTION_STRING
+PEP 696: Type parameters (typing.TypeVar, typing.ParamSpec, and typing.TypeVarTuple) now support defaults.
 
-# Placeholder for future Azure integration
-# Uncomment and implement when you're ready to add Azure functionality
+PEP 702: The new warnings.deprecated() decorator adds support for marking deprecations in the type system and at runtime.
 
-class AzureStorageManager:
-    def __init__(self):
-        self.storage_connection_string = AZURE_STORAGE_CONNECTION_STRING
-        self.cosmos_connection_string = AZURE_COSMOS_CONNECTION_STRING
-        
-    def upload_document_to_blob(self, document_content, filename, container_name="documentation"):
-        """
-        Upload generated documentation to Azure Blob Storage
-        """
-        # TODO: Implement Azure Blob Storage upload
-        # from azure.storage.blob import BlobServiceClient
-        
-        try:
-            # blob_service_client = BlobServiceClient.from_connection_string(self.storage_connection_string)
-            # blob_client = blob_service_client.get_blob_client(container=container_name, blob=filename)
-            # blob_client.upload_blob(document_content, overwrite=True)
-            print(f"Would upload {filename} to Azure Blob Storage")
-            return f"https://yourstorageaccount.blob.core.windows.net/{container_name}/{filename}"
-        except Exception as e:
-            raise Exception(f"Failed to upload to Azure Blob Storage: {str(e)}")
-    
-    def save_metadata_to_cosmos(self, metadata):
-        """
-        Save document metadata to Azure Cosmos DB
-        """
-        # TODO: Implement Azure Cosmos DB integration
-        # from azure.cosmos import CosmosClient
-        
-        try:
-            # cosmos_client = CosmosClient.from_connection_string(self.cosmos_connection_string)
-            # database = cosmos_client.get_database_client("DocumentationDB")
-            # container = database.get_container_client("DocumentMetadata")
-            # container.create_item(metadata)
-            print(f"Would save metadata to Cosmos DB: {metadata}")
-            return True
-        except Exception as e:
-            raise Exception(f"Failed to save metadata to Cosmos DB: {str(e)}")
-    
-    def get_document_history(self, repo_url):
-        """
-        Retrieve document generation history for a repository
-        """
-        # TODO: Implement retrieval from Cosmos DB
-        return []
-    
-    def store_documentation(self, repo_url, documentation_content, project_name):
-        """
-        Complete storage workflow: upload to blob and save metadata
-        """
-        try:
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = f"{project_name}_{timestamp}.md"
-            
-            # Upload to blob storage
-            blob_url = self.upload_document_to_blob(documentation_content, filename)
-            
-            # Save metadata
-            metadata = {
-                "id": f"{project_name}_{timestamp}",
-                "repo_url": repo_url,
-                "project_name": project_name,
-                "filename": filename,
-                "blob_url": blob_url,
-                "created_at": datetime.now().isoformat(),
-                "document_type": "auto_generated",
-                "file_size": len(documentation_content)
-            }
-            
-            self.save_metadata_to_cosmos(metadata)
-            
-            return {
-                "success": True,
-                "blob_url": blob_url,
-                "metadata": metadata
-            }
-            
-        except Exception as e:
-            return {
-                "success": False,
-                "error": str(e)
-            }
+PEP 705: typing.ReadOnly can be used to mark an item of a typing.TypedDict as read-only for type checkers.
 
-# Example usage (for future implementation)
-def store_generated_documentation(repo_url, documentation, project_name):
-    """
-    Helper function to store documentation in Azure
-    """
-    if AZURE_STORAGE_CONNECTION_STRING and AZURE_COSMOS_CONNECTION_STRING:
-        storage_manager = AzureStorageManager()
-        result = storage_manager.store_documentation(repo_url, documentation, project_name)
-        return result
-    else:
-        print("Azure credentials not configured. Skipping cloud storage.")
-        return {"success": False, "error": "Azure not configured"}
+PEP 742: typing.TypeIs provides more intuitive type narrowing behavior, as an alternative to typing.TypeGuard.
 
-#requirements.txt
-python-dotenv==1.0.0
-requests==2.31.0
-urllib3==2.0.4
+Platform support:
 
-#create .env also 
-for llama 
-for gitlab 
-for azure cosmos
-for azure db
+PEP 730: Apple’s iOS is now an officially supported platform, at tier 3.
+
+PEP 738: Android is now an officially supported platform, at tier 3.
+
+wasm32-wasi is now supported as a tier 2 platform.
+
+wasm32-emscripten is no longer an officially supported platform.
+
+Important removals:
+
+PEP 594: The remaining 19 “dead batteries” (legacy stdlib modules) have been removed from the standard library: aifc, audioop, cgi, cgitb, chunk, crypt, imghdr, mailcap, msilib, nis, nntplib, ossaudiodev, pipes, sndhdr, spwd, sunau, telnetlib, uu and xdrlib.
+
+Remove the 2to3 tool and lib2to3 module (deprecated in Python 3.11).
+
+Remove the tkinter.tix module (deprecated in Python 3.6).
+
+Remove the locale.resetlocale() function.
+
+Remove the typing.io and typing.re namespaces.
+
+Remove chained classmethod descriptors.
