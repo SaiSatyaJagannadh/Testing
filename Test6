@@ -1,542 +1,97 @@
+What’s New In Python 3.13
+Editors:
+Adam Turner and Thomas Wouters
 
-# core.py - Fixed for UBS Internal AI API
+This article explains the new features in Python 3.13, compared to 3.12. Python 3.13 was released on October 7, 2024. For full details, see the changelog.
 
-import requests
-import base64
-import json
-import urllib3
-from urllib.parse import urlparse
-from config import GITLAB_TOKEN, LLAMA_API_KEY
+See also PEP 719 – Python 3.13 Release Schedule
+Summary – Release Highlights
+Python 3.13 is the latest stable release of the Python programming language, with a mix of changes to the language, the implementation and the standard library. The biggest changes include a new interactive interpreter, experimental support for running in a free-threaded mode (PEP 703), and a Just-In-Time compiler (PEP 744).
 
-# Disable SSL warnings if we're going to disable verification
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+Error messages continue to improve, with tracebacks now highlighted in color by default. The locals() builtin now has defined semantics for changing the returned mapping, and type parameters now support default values.
 
-class GitLabClient:
-    def __init__(self, token, verify_ssl=False):
-        self.token = token
-        self.headers = {"PRIVATE-TOKEN": token}
-        self.verify_ssl = verify_ssl
-        
-        # Configure session for better SSL handling
-        self.session = requests.Session()
-        self.session.headers.update(self.headers)
-        self.session.verify = verify_ssl
-        
-        # Add timeout and retry logic
-        from requests.adapters import HTTPAdapter
-        from urllib3.util.retry import Retry
-        
-        retry_strategy = Retry(
-            total=3,
-            backoff_factor=1,
-            status_forcelist=[429, 500, 502, 503, 504],
-        )
-        adapter = HTTPAdapter(max_retries=retry_strategy)
-        self.session.mount("http://", adapter)
-        self.session.mount("https://", adapter)
-        
-    def get_project_info(self, repo_url):
-        """Extract project info from GitLab URL"""
-        try:
-            parsed = urlparse(repo_url)
-            gitlab_host = f"{parsed.scheme}://{parsed.netloc}"
-            project_path = parsed.path.strip('/').replace('.git', '')
-            
-            # Get project ID - try different URL encoding approaches
-            encoded_path = requests.utils.quote(project_path, safe='')
-            api_url = f"{gitlab_host}/api/v4/projects/{encoded_path}"
-            
-            print(f"Connecting to: {api_url}")
-            print(f"SSL Verification: {self.verify_ssl}")
-            
-            response = self.session.get(api_url, timeout=30)
-            response.raise_for_status()
-            return response.json(), gitlab_host
-            
-        except requests.exceptions.SSLError as e:
-            print(f"SSL Error: {e}")
-            print("Retrying with SSL verification disabled...")
-            self.session.verify = False
-            try:
-                response = self.session.get(api_url, timeout=30)
-                response.raise_for_status()
-                return response.json(), gitlab_host
-            except Exception as retry_e:
-                raise Exception(f"Failed to fetch project info even without SSL verification: {str(retry_e)}")
-        except requests.exceptions.ConnectionError as e:
-            raise Exception(f"Connection error - check your network and GitLab URL: {str(e)}")
-        except requests.exceptions.Timeout as e:
-            raise Exception(f"Request timeout - GitLab server may be slow: {str(e)}")
-        except requests.exceptions.HTTPError as e:
-            if response.status_code == 401:
-                raise Exception("Authentication failed - check your GitLab token")
-            elif response.status_code == 404:
-                raise Exception("Repository not found - check the URL and access permissions")
-            else:
-                raise Exception(f"HTTP {response.status_code}: {response.reason}")
-        except Exception as e:
-            raise Exception(f"Failed to fetch project info: {str(e)}")
-    
-    def get_repository_tree(self, gitlab_host, project_id):
-        """Get repository file tree"""
-        try:
-            api_url = f"{gitlab_host}/api/v4/projects/{project_id}/repository/tree"
-            params = {"recursive": True, "per_page": 100}
-            
-            all_files = []
-            page = 1
-            
-            while True:
-                params["page"] = page
-                response = self.session.get(api_url, params=params, timeout=30)
-                response.raise_for_status()
-                
-                files = response.json()
-                if not files:
-                    break
-                    
-                all_files.extend([f for f in files if f['type'] == 'blob'])
-                page += 1
-                
-                if len(files) < 100:
-                    break
-                    
-                if page > 50:
-                    print("Warning: Stopped at page 50 to prevent excessive requests")
-                    break
-            
-            return all_files
-            
-        except Exception as e:
-            raise Exception(f"Failed to fetch repository tree: {str(e)}")
-    
-    def get_file_content(self, gitlab_host, project_id, file_path):
-        """Get content of a specific file"""
-        try:
-            encoded_path = requests.utils.quote(file_path, safe='')
-            api_url = f"{gitlab_host}/api/v4/projects/{project_id}/repository/files/{encoded_path}"
-            
-            for branch in ["main", "master", "develop"]:
-                params = {"ref": branch}
-                response = self.session.get(api_url, params=params, timeout=30)
-                
-                if response.status_code == 200:
-                    file_data = response.json()
-                    try:
-                        content = base64.b64decode(file_data['content']).decode('utf-8')
-                        return content
-                    except UnicodeDecodeError:
-                        try:
-                            content = base64.b64decode(file_data['content']).decode('latin1')
-                            return f"[Binary file content - {len(content)} bytes]"
-                        except:
-                            return f"[Unable to decode file content]"
-                elif response.status_code != 404:
-                    response.raise_for_status()
-            
-            return f"File not found in any branch: {file_path}"
-            
-        except Exception as e:
-            return f"Error reading file {file_path}: {str(e)}"
+The library changes contain removal of deprecated APIs and modules, as well as the usual improvements in user-friendliness and correctness. Several legacy standard library modules have now been removed following their deprecation in Python 3.11 (PEP 594).
 
-class CodeProcessor:
-    def __init__(self):
-        self.supported_extensions = ['.py', '.js', '.java', '.cpp', '.c', '.h', '.md', '.txt', '.yml', '.yaml', '.json', '.xml', '.html', '.css', '.rb', '.go', '.rs', '.php', '.ts', '.jsx', '.tsx']
-    
-    def filter_files(self, files):
-        """Filter files by supported extensions"""
-        filtered = []
-        for file_info in files:
-            file_path = file_info['path']
-            if any(file_path.endswith(ext) for ext in self.supported_extensions):
-                if not self._should_skip_file(file_path):
-                    filtered.append(file_info)
-        return filtered
-    
-    def _should_skip_file(self, file_path):
-        """Skip certain files/directories"""
-        skip_patterns = [
-            'node_modules/', '.git/', '__pycache__/', '.venv/', 'venv/',
-            '.idea/', '.vscode/', 'dist/', 'build/', 'target/', 'vendor/',
-            '.next/', '.nuxt/', 'coverage/', '.nyc_output/'
-        ]
-        return any(pattern in file_path for pattern in skip_patterns)
-    
-    def chunk_content(self, files_content, max_chunk_size=4000):
-        """Split content into chunks for LLaMA processing"""
-        chunks = []
-        current_chunk = ""
-        current_files = []
-        
-        for file_path, content in files_content.items():
-            file_section = f"\n\n=== FILE: {file_path} ===\n{content}\n"
-            
-            if len(current_chunk + file_section) > max_chunk_size:
-                if current_chunk:
-                    chunks.append({
-                        'content': current_chunk,
-                        'files': current_files.copy()
-                    })
-                current_chunk = file_section
-                current_files = [file_path]
-            else:
-                current_chunk += file_section
-                current_files.append(file_path)
-        
-        if current_chunk:
-            chunks.append({
-                'content': current_chunk,
-                'files': current_files
-            })
-        
-        return chunks
+This article doesn’t attempt to provide a complete specification of all new features, but instead gives a convenient overview. For full details refer to the documentation, such as the Library Reference and Language Reference. To understand the complete implementation and design rationale for a change, refer to the PEP for a particular new feature; but note that PEPs usually are not kept up-to-date once a feature has been fully implemented. See Porting to Python 3.13 for guidance on upgrading from earlier versions of Python.
 
-class LlamaClient:
-    def __init__(self, api_key):
-        self.api_key = api_key
-        
-        # UBS Internal AI API Configuration - Fixed endpoint
-        self.base_url = "https://chat.copdev.azpriv-cloud.ubs.net/api/v1/chat/completions"
-        
-        print("Initializing UBS Internal AI API client...")
-        
-        # Available models from your screenshot
-        self.available_models = [
-            "llama-4-scout-instruct",
-            "llama-3.3-70b-instruct"
-        ]
-        print(f"Available UBS models: {self.available_models}")
-        
-        # Test connection with a simple chat request instead of GET to models endpoint
-        self._test_connection()
-    
-    def _test_connection(self):
-        """Test API connectivity with a simple chat request"""
-        try:
-            headers = {
-                "Authorization": f"Bearer {self.api_key}",
-                "Content-Type": "application/json",
-                "User-Agent": "UBS-Documentation-Generator/1.0"
-            }
-            
-            # Simple test payload
-            test_payload = {
-                "model": "llama-4-scout-instruct",
-                "messages": [
-                    {"role": "user", "content": "Hello, this is a connection test. Please respond with 'Connection successful'."}
-                ],
-                "max_tokens": 20,
-                "temperature": 0.1
-            }
-            
-            print(f"Testing connection to: {self.base_url}")
-            
-            response = requests.post(
-                self.base_url, 
-                headers=headers, 
-                json=test_payload, 
-                timeout=30, 
-                verify=False  # For internal UBS certificates
-            )
-            
-            print(f"Connection test response status: {response.status_code}")
-            
-            if response.status_code == 200:
-                print("✓ UBS Internal AI API connection successful")
-                result = response.json()
-                if "choices" in result and len(result["choices"]) > 0:
-                    test_response = result["choices"][0]["message"]["content"]
-                    print(f"Test response: {test_response}")
-            elif response.status_code == 401:
-                raise Exception("Invalid API key - check your UBS API credentials")
-            elif response.status_code == 403:
-                raise Exception("API access forbidden - check your UBS account permissions")
-            elif response.status_code == 405:
-                raise Exception("Method not allowed - API endpoint configuration issue")
-            else:
-                print(f"Connection test returned status {response.status_code}")
-                print(f"Response: {response.text}")
-                print("Proceeding anyway - API might still work for documentation requests")
-            
-        except requests.exceptions.ConnectionError as e:
-            raise Exception(f"Cannot connect to UBS Internal AI API - check your network connection and VPN: {str(e)}")
-        except requests.exceptions.Timeout as e:
-            raise Exception(f"UBS API connection timeout: {str(e)}")
-        except Exception as e:
-            print(f"Connection test warning: {str(e)}")
-            print("Proceeding anyway - the API might still work for documentation requests")
-    
-    def _select_best_model(self):
-        """Select the best available model"""
-        # Prefer llama-4-scout-instruct as it's shown as selected in your screenshot
-        return "llama-4-scout-instruct"
-    
-    def generate_documentation(self, code_chunk, project_name=""):
-        """Generate documentation for code chunk using UBS LLaMA"""
-        model = self._select_best_model()
-        
-        prompt = f"""You are an expert technical documentation generator. Analyze the provided code and generate comprehensive documentation.
+Interpreter improvements:
 
-Project: {project_name}
-Files included: {', '.join(code_chunk['files'])}
+A greatly improved interactive interpreter and improved error messages.
 
-Code Content:
-{code_chunk['content']}
+PEP 667: The locals() builtin now has defined semantics when mutating the returned mapping. Python debuggers and similar tools may now more reliably update local variables in optimized scopes even during concurrent code execution.
 
-Generate detailed documentation that includes:
-1. **Overview**: Brief description of what these files do
-2. **Key Components**: Main classes, functions, and their purposes  
-3. **Dependencies**: External libraries and frameworks used
-4. **Code Structure**: How the code is organized
-5. **Technical Details**: Important implementation details
+PEP 703: CPython 3.13 has experimental support for running with the global interpreter lock disabled. See Free-threaded CPython for more details.
 
-Format the response in clear markdown with proper headers and code examples where relevant."""
+PEP 744: A basic JIT compiler was added. It is currently disabled by default (though we may turn it on later). Performance improvements are modest – we expect to improve this over the next few releases.
 
-        headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json",
-            "User-Agent": "UBS-Documentation-Generator/1.0"
-        }
-        
-        payload = {
-            "model": model,
-            "messages": [
-                {
-                    "role": "system", 
-                    "content": "You are a helpful technical documentation expert. Generate clear, comprehensive documentation for code repositories."
-                },
-                {
-                    "role": "user", 
-                    "content": prompt
-                }
-            ],
-            "max_tokens": 2000,
-            "temperature": 0.3,
-            "top_p": 0.9
-        }
-        
-        try:
-            print(f"Making documentation generation request with model {model}")
-            response = requests.post(
-                self.base_url, 
-                headers=headers, 
-                json=payload, 
-                timeout=90,  # Increased timeout for longer responses
-                verify=False
-            )
-            
-            print(f"Documentation response status: {response.status_code}")
-            
-            if response.status_code == 200:
-                result = response.json()
-                
-                # Handle different response formats
-                if "choices" in result and len(result["choices"]) > 0:
-                    return result["choices"][0]["message"]["content"]
-                elif "response" in result:
-                    return result["response"]
-                elif "content" in result:
-                    return result["content"]
-                else:
-                    return f"Unexpected response format: {result}"
-            else:
-                error_msg = f"HTTP {response.status_code}: {response.text}"
-                print(f"Documentation generation error: {error_msg}")
-                return f"Error generating documentation: {error_msg}"
-            
-        except requests.exceptions.HTTPError as e:
-            return f"HTTP Error: {str(e)}"
-        except requests.exceptions.ConnectionError as e:
-            return f"Connection Error: Unable to connect to UBS API. Check VPN and network. Details: {str(e)}"
-        except requests.exceptions.Timeout as e:
-            return f"Timeout Error: Request took too long. Try again."
-        except Exception as e:
-            return f"Error generating documentation: {str(e)}"
-    
-    def generate_project_overview(self, project_info, all_files):
-        """Generate overall project documentation"""
-        model = self._select_best_model()
-        
-        files_list = "\n".join([f"- {f}" for f in all_files[:20]])
-        if len(all_files) > 20:
-            files_list += f"\n... and {len(all_files) - 20} more files"
-        
-        prompt = f"""Generate a comprehensive project README for this GitLab repository:
+Color support in the new interactive interpreter, as well as in tracebacks and doctest output. This can be disabled through the PYTHON_COLORS and NO_COLOR environment variables.
 
-Project Name: {project_info.get('name', 'Unknown')}
-Description: {project_info.get('description', 'No description provided')}
-Default Branch: {project_info.get('default_branch', 'main')}
+Python data model improvements:
 
-Files in repository:
-{files_list}
+__static_attributes__ stores the names of attributes accessed through self.X in any function in a class body.
 
-Create a professional README that includes:
-1. **Project Title and Description**
-2. **Architecture Overview** 
-3. **Technology Stack**
-4. **Installation Instructions**
-5. **Usage Guide**
-6. **File Structure Explanation**
-7. **Contributing Guidelines**
+__firstlineno__ records the first line number of a class definition.
 
-Make it comprehensive and suitable for both developers and stakeholders."""
+Significant improvements in the standard library:
 
-        headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json",
-            "User-Agent": "UBS-Documentation-Generator/1.0"
-        }
-        
-        payload = {
-            "model": model,
-            "messages": [
-                {
-                    "role": "system", 
-                    "content": "You are a helpful technical documentation expert. Generate professional project documentation."
-                },
-                {
-                    "role": "user", 
-                    "content": prompt
-                }
-            ],
-            "max_tokens": 3000,
-            "temperature": 0.2,
-            "top_p": 0.9
-        }
-        
-        try:
-            print(f"Making project overview request with model {model}")
-            response = requests.post(
-                self.base_url, 
-                headers=headers, 
-                json=payload, 
-                timeout=90, 
-                verify=False
-            )
-            
-            print(f"Project overview response status: {response.status_code}")
-            
-            if response.status_code == 200:
-                result = response.json()
-                
-                if "choices" in result and len(result["choices"]) > 0:
-                    return result["choices"][0]["message"]["content"]
-                elif "response" in result:
-                    return result["response"]
-                elif "content" in result:
-                    return result["content"]
-                else:
-                    return f"Unexpected response format: {result}"
-            else:
-                error_msg = f"HTTP {response.status_code}: {response.text}"
-                print(f"Project overview error: {error_msg}")
-                return f"Error generating project overview: {error_msg}"
-                
-        except Exception as e:
-            error_msg = f"Error generating project overview: {str(e)}"
-            print(error_msg)
-            return error_msg
+Add a new PythonFinalizationError exception, raised when an operation is blocked during finalization.
 
-class DocumentationGenerator:
-    def __init__(self, verify_ssl=False):
-        self.gitlab_client = GitLabClient(GITLAB_TOKEN, verify_ssl=verify_ssl)
-        self.code_processor = CodeProcessor()
-        self.llama_client = LlamaClient(LLAMA_API_KEY)
-    
-    def generate_documentation(self, repo_url, status_callback=None):
-        """Main function to generate complete documentation"""
-        try:
-            # Step 1: Get project info
-            if status_callback:
-                status_callback("Connecting to GitLab...")
-            project_info, gitlab_host = self.gitlab_client.get_project_info(repo_url)
-            project_id = project_info['id']
-            
-            # Step 2: Get repository files
-            if status_callback:
-                status_callback("Fetching repository structure...")
-            all_files = self.gitlab_client.get_repository_tree(gitlab_host, project_id)
-            
-            # Step 3: Filter and process files
-            if status_callback:
-                status_callback("Processing code files...")
-            filtered_files = self.code_processor.filter_files(all_files)
-            
-            # Step 4: Get file contents
-            if status_callback:
-                status_callback("Reading file contents...")
-            files_content = {}
-            max_files = min(15, len(filtered_files))  # Limit to 15 files
-            
-            for i, file_info in enumerate(filtered_files[:max_files]):
-                if status_callback:
-                    status_callback(f"Reading file {i+1}/{max_files}: {file_info['path']}")
-                content = self.gitlab_client.get_file_content(gitlab_host, project_id, file_info['path'])
-                if not content.startswith("Error reading") and not content.startswith("File not found"):
-                    files_content[file_info['path']] = content
-            
-            if not files_content:
-                raise Exception("No readable files found in the repository")
-            
-            # Step 5: Generate project overview
-            if status_callback:
-                status_callback("Generating project overview...")
-            project_overview = self.llama_client.generate_project_overview(
-                project_info, list(files_content.keys())
-            )
-            
-            # Step 6: Process code chunks
-            if status_callback:
-                status_callback("Processing code for AI analysis...")
-            chunks = self.code_processor.chunk_content(files_content)
-            
-            # Step 7: Generate documentation for each chunk
-            documentation_parts = [project_overview]
-            
-            for i, chunk in enumerate(chunks):
-                if status_callback:
-                    status_callback(f"Generating documentation for chunk {i+1}/{len(chunks)}...")
-                chunk_doc = self.llama_client.generate_documentation(chunk, project_info.get('name', ''))
-                documentation_parts.append(f"\n\n## Code Analysis - Part {i+1}\n\n{chunk_doc}")
-            
-            # Step 8: Combine all documentation
-            if status_callback:
-                status_callback("Finalizing documentation...")
-            
-            final_documentation = "\n\n".join(documentation_parts)
-            
-            # Add metadata footer
-            final_documentation += f"\n\n---\n*Documentation generated automatically from GitLab repository: {repo_url}*"
-            final_documentation += f"\n*Files processed: {len(files_content)}*"
-            final_documentation += f"\n*Generated using UBS Internal AI API*"
-            
-            return final_documentation
-            
-        except Exception as e:
-            raise Exception(f"Documentation generation failed: {str(e)}")
+The argparse module now supports deprecating command-line options, positional arguments, and subcommands.
 
-# Usage example:
-if __name__ == "__main__":
-    try:
-        # Initialize the documentation generator
-        doc_gen = DocumentationGenerator(verify_ssl=False)  # Set to True if you have proper SSL certs
-        
-        # Your GitLab repository URL
-        repo_url = "https://devcloud.ubs.net/t678425/00108_dmt_upload_ai"  # Replace with your actual repo URL
-        
-        def print_status(status):
-            print(f"Status: {status}")
-        
-        # Generate documentation
-        print("Starting documentation generation...")
-        documentation = doc_gen.generate_documentation(repo_url, status_callback=print_status)
-        
-        # Save to file
-        with open("generated_documentation.md", "w", encoding="utf-8") as f:
-            f.write(documentation)
-        
-        print("Documentation generated successfully!")
-        print("Saved to: generated_documentation.md")
-        
-    except Exception as e:
-        print(f"Error: {str(e)}")
+The new functions base64.z85encode() and base64.z85decode() support encoding and decoding Z85 data.
+
+The copy module now has a copy.replace() function, with support for many builtin types and any class defining the __replace__() method.
+
+The new dbm.sqlite3 module is now the default dbm backend.
+
+The os module has a suite of new functions for working with Linux’s timer notification file descriptors.
+
+The random module now has a command-line interface.
+
+Security improvements:
+
+ssl.create_default_context() sets ssl.VERIFY_X509_PARTIAL_CHAIN and ssl.VERIFY_X509_STRICT as default flags.
+
+C API improvements:
+
+The Py_mod_gil slot is now used to indicate that an extension module supports running with the GIL disabled.
+
+The PyTime C API has been added, providing access to system clocks.
+
+PyMutex is a new lightweight mutex that occupies a single byte.
+
+There is a new suite of functions for generating PEP 669 monitoring events in the C API.
+
+New typing features:
+
+PEP 696: Type parameters (typing.TypeVar, typing.ParamSpec, and typing.TypeVarTuple) now support defaults.
+
+PEP 702: The new warnings.deprecated() decorator adds support for marking deprecations in the type system and at runtime.
+
+PEP 705: typing.ReadOnly can be used to mark an item of a typing.TypedDict as read-only for type checkers.
+
+PEP 742: typing.TypeIs provides more intuitive type narrowing behavior, as an alternative to typing.TypeGuard.
+
+Platform support:
+
+PEP 730: Apple’s iOS is now an officially supported platform, at tier 3.
+
+PEP 738: Android is now an officially supported platform, at tier 3.
+
+wasm32-wasi is now supported as a tier 2 platform.
+
+wasm32-emscripten is no longer an officially supported platform.
+
+Important removals:
+
+PEP 594: The remaining 19 “dead batteries” (legacy stdlib modules) have been removed from the standard library: aifc, audioop, cgi, cgitb, chunk, crypt, imghdr, mailcap, msilib, nis, nntplib, ossaudiodev, pipes, sndhdr, spwd, sunau, telnetlib, uu and xdrlib.
+
+Remove the 2to3 tool and lib2to3 module (deprecated in Python 3.11).
+
+Remove the tkinter.tix module (deprecated in Python 3.6).
+
+Remove the locale.resetlocale() function.
+
+Remove the typing.io and typing.re namespaces.
+
+Remove chained classmethod descriptors.
