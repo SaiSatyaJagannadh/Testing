@@ -1,27 +1,3 @@
-python-dotenv==0.19.2
-pandas==1.3.5
-requests==2.27.1
-scikit-learn==1.0.2
-matplotlib==3.5.3
-seaborn==0.11.2
-numpy==1.21.6
-
-
-# LLaMA API Configuration
-LLAMA_API_KEY=your_replicate_api_key_here
-LLAMA_MODEL=meta/llama-4-scout-instruct
-TEMPERATURE=0.3
-API_ENDPOINT=https://api.replicate.com/v1/predictions
-
-# Optional: Email Configuration
-EMAIL_USER=your_email@gmail.com
-EMAIL_PASS=your_app_password
-IMAP_SERVER=imap.gmail.com
-IMAP_PORT=993
-
-
-####smart_flagger.py
-
 import pandas as pd
 import json
 import re
@@ -34,20 +10,28 @@ load_dotenv()
 
 class SmartFlagger:
     def __init__(self):
+        # Load all configuration from .env file
         self.api_key = os.getenv('LLAMA_API_KEY')
-        self.model_name = os.getenv('LLAMA_MODEL', 'meta/llama-4-scout-instruct')
+        self.model_name = os.getenv('LLAMA_MODEL', 'llama-4-scout-instruct')
         self.temperature = float(os.getenv('TEMPERATURE', '0.3'))
         self.api_url = os.getenv('API_ENDPOINT', 'https://api.replicate.com/v1/predictions')
+        
+        # Validate required configuration
+        if not self.api_key:
+            raise ValueError("LLAMA_API_KEY not found in .env file")
+        
+        print(f"Initialized SmartFlagger with model: {self.model_name}")
         
         # Keywords for importance detection
         self.important_keywords = [
             'urgent', 'critical', 'emergency', 'down', 'failed', 'error',
             'incident', 'outage', 'alert', 'warning', 'issue', 'problem',
-            'security', 'breach', 'unauthorized', 'malware', 'virus'
+            'security', 'breach', 'unauthorized', 'malware', 'virus', 'attack',
+            'compromise', 'threat', 'vulnerability', 'exploit', 'phishing'
         ]
     
     def _call_llama_api(self, prompt):
-        """Call LLaMA-4-Scout-Instruct API with proper endpoint"""
+        """Call LLaMA API using configuration from .env"""
         headers = {
             'Authorization': f'Token {self.api_key}',
             'Content-Type': 'application/json'
@@ -81,7 +65,9 @@ class SmartFlagger:
     
     def _get_prediction_result(self, prediction_id):
         """Get result from async prediction"""
-        get_url = f"https://api.replicate.com/v1/predictions/{prediction_id}"
+        base_url = self.api_url.replace('/predictions', '')
+        get_url = f"{base_url}/predictions/{prediction_id}"
+        
         headers = {'Authorization': f'Token {self.api_key}'}
         
         # Poll for result (max 60 seconds)
@@ -208,7 +194,8 @@ class SmartFlagger:
         """Extract ticket ID from text"""
         patterns = [
             r'INC\d+', r'REQ\d+', r'TICKET[\s#]*(\d+)', 
-            r'ID[\s#]*(\d+)', r'#(\d+)', r'CASE\d+'
+            r'ID[\s#]*(\d+)', r'#(\d+)', r'CASE\d+',
+            r'RITM\d+', r'CHG\d+', r'PRB\d+'
         ]
         for pattern in patterns:
             match = re.search(pattern, text, re.IGNORECASE)
@@ -220,13 +207,14 @@ class SmartFlagger:
         """Extract incident type"""
         text_lower = text.lower()
         types = {
-            'database': ['database', 'db', 'sql', 'mysql', 'postgresql'],
-            'server': ['server', 'host', 'machine', 'vm'],
-            'network': ['network', 'connectivity', 'dns', 'routing'],
-            'application': ['application', 'app', 'service', 'api'],
+            'database': ['database', 'db', 'sql', 'mysql', 'postgresql', 'oracle'],
+            'server': ['server', 'host', 'machine', 'vm', 'virtual machine'],
+            'network': ['network', 'connectivity', 'dns', 'routing', 'firewall'],
+            'application': ['application', 'app', 'service', 'api', 'web service'],
             'security': ['security', 'breach', 'unauthorized', 'malware', 'virus'],
-            'email': ['email', 'mail', 'smtp', 'exchange'],
-            'storage': ['storage', 'disk', 'backup', 'file system']
+            'email': ['email', 'mail', 'smtp', 'exchange', 'outlook'],
+            'storage': ['storage', 'disk', 'backup', 'file system', 'nas'],
+            'performance': ['slow', 'performance', 'timeout', 'latency']
         }
         
         for incident_type, keywords in types.items():
@@ -238,11 +226,11 @@ class SmartFlagger:
     def _extract_severity(self, text):
         """Extract severity level"""
         text_lower = text.lower()
-        if any(word in text_lower for word in ['critical', 'emergency', 'urgent']):
+        if any(word in text_lower for word in ['critical', 'emergency', 'urgent', 'p1']):
             return 'Critical'
-        elif any(word in text_lower for word in ['high', 'important', 'priority']):
+        elif any(word in text_lower for word in ['high', 'important', 'priority', 'p2']):
             return 'High'
-        elif any(word in text_lower for word in ['medium', 'moderate', 'warning']):
+        elif any(word in text_lower for word in ['medium', 'moderate', 'warning', 'p3']):
             return 'Medium'
         else:
             return 'Low'
@@ -252,7 +240,8 @@ class SmartFlagger:
         systems = []
         system_keywords = [
             'database', 'server', 'web', 'api', 'portal', 'gateway',
-            'email', 'exchange', 'active directory', 'dns', 'firewall'
+            'email', 'exchange', 'active directory', 'dns', 'firewall',
+            'load balancer', 'proxy', 'vpn', 'backup', 'storage'
         ]
         
         text_lower = text.lower()
@@ -268,7 +257,8 @@ class SmartFlagger:
             r'\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}',
             r'\d{2}:\d{2}:\d{2}',
             r'\d{1,2}/\d{1,2}/\d{4}',
-            r'\d{1,2}-\d{1,2}-\d{4}'
+            r'\d{1,2}-\d{1,2}-\d{4}',
+            r'\d{4}/\d{2}/\d{2}'
         ]
         for pattern in timestamp_patterns:
             match = re.search(pattern, text)
@@ -290,12 +280,12 @@ class SmartFlagger:
         """Extract assigned team"""
         text_lower = text.lower()
         teams = {
-            'infrastructure': ['infrastructure', 'infra', 'system admin'],
+            'infrastructure': ['infrastructure', 'infra', 'system admin', 'sysadmin'],
             'database': ['database', 'dba', 'db team'],
-            'network': ['network', 'networking', 'net ops'],
-            'security': ['security', 'infosec', 'cyber'],
-            'application': ['application', 'dev', 'development'],
-            'support': ['support', 'helpdesk', 'service desk']
+            'network': ['network', 'networking', 'net ops', 'netops'],
+            'security': ['security', 'infosec', 'cyber', 'soc'],
+            'application': ['application', 'dev', 'development', 'app team'],
+            'support': ['support', 'helpdesk', 'service desk', 'it support']
         }
         
         for team, keywords in teams.items():
@@ -307,9 +297,9 @@ class SmartFlagger:
     def _assess_impact(self, text):
         """Assess impact level"""
         text_lower = text.lower()
-        if any(word in text_lower for word in ['critical', 'production', 'outage', 'down']):
+        if any(word in text_lower for word in ['critical', 'production', 'outage', 'down', 'offline']):
             return 'High'
-        elif any(word in text_lower for word in ['warning', 'degraded', 'slow']):
+        elif any(word in text_lower for word in ['warning', 'degraded', 'slow', 'performance']):
             return 'Medium'
         else:
             return 'Low'
@@ -381,22 +371,33 @@ if __name__ == "__main__":
     flagger = SmartFlagger()
     flagger.process_emails('data/emails.csv', 'data/extracted_keyvalues.json')
 
-####llama_doc_generator.py
+
 import json
 import os
 import requests
 import time
 from datetime import datetime
 from dotenv import load_dotenv
+from reportlab.lib.pagesizes import letter
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.units import inch
+from docx import Document
+from docx.shared import Inches
 
 load_dotenv()
 
 class LlamaDocGenerator:
     def __init__(self):
         self.api_key = os.getenv('LLAMA_API_KEY')
-        self.model_name = os.getenv('LLAMA_MODEL', 'meta/llama-4-scout-instruct')
+        self.model_name = os.getenv('LLAMA_MODEL', 'llama-4-scout-instruct')
         self.temperature = float(os.getenv('TEMPERATURE', '0.3'))
         self.api_url = os.getenv('API_ENDPOINT', 'https://api.replicate.com/v1/predictions')
+        
+        if not self.api_key:
+            raise ValueError("LLAMA_API_KEY not found in .env file")
+        
+        print(f"Initialized LlamaDocGenerator with model: {self.model_name}")
     
     def _call_llama_api(self, prompt):
         """Call LLaMA API"""
@@ -433,7 +434,9 @@ class LlamaDocGenerator:
     
     def _get_prediction_result(self, prediction_id):
         """Get result from async prediction"""
-        get_url = f"https://api.replicate.com/v1/predictions/{prediction_id}"
+        base_url = self.api_url.replace('/predictions', '')
+        get_url = f"{base_url}/predictions/{prediction_id}"
+        
         headers = {'Authorization': f'Token {self.api_key}'}
         
         # Poll for result (max 60 seconds)
@@ -455,6 +458,89 @@ class LlamaDocGenerator:
         
         print("Prediction timed out")
         return None
+    
+    def save_as_pdf(self, content, output_path):
+        """Save content as PDF"""
+        try:
+            doc = SimpleDocTemplate(output_path, pagesize=letter,
+                                  rightMargin=72, leftMargin=72,
+                                  topMargin=72, bottomMargin=18)
+            
+            styles = getSampleStyleSheet()
+            story = []
+            
+            # Add title style
+            title_style = ParagraphStyle(
+                'CustomTitle',
+                parent=styles['Heading1'],
+                fontSize=16,
+                spaceAfter=30,
+                alignment=1  # Center alignment
+            )
+            
+            # Process content
+            lines = content.split('\n')
+            for line in lines:
+                line = line.strip()
+                if not line:
+                    story.append(Spacer(1, 12))
+                    continue
+                
+                # Check if it's a heading
+                if line.startswith('# '):
+                    story.append(Paragraph(line[2:], title_style))
+                elif line.startswith('## '):
+                    story.append(Paragraph(line[3:], styles['Heading2']))
+                elif line.startswith('### '):
+                    story.append(Paragraph(line[4:], styles['Heading3']))
+                elif line.startswith('#### '):
+                    story.append(Paragraph(line[5:], styles['Heading4']))
+                else:
+                    story.append(Paragraph(line, styles['Normal']))
+                
+                story.append(Spacer(1, 6))
+            
+            doc.build(story)
+            return True
+            
+        except Exception as e:
+            print(f"Error saving PDF: {e}")
+            return False
+    
+    def save_as_doc(self, content, output_path):
+        """Save content as DOC"""
+        try:
+            doc = Document()
+            
+            # Add title
+            title = doc.add_heading('IT Incident Report', 0)
+            title.alignment = 1  # Center alignment
+            
+            # Process content
+            lines = content.split('\n')
+            for line in lines:
+                line = line.strip()
+                if not line:
+                    continue
+                
+                # Check if it's a heading
+                if line.startswith('# '):
+                    doc.add_heading(line[2:], level=1)
+                elif line.startswith('## '):
+                    doc.add_heading(line[3:], level=2)
+                elif line.startswith('### '):
+                    doc.add_heading(line[4:], level=3)
+                elif line.startswith('#### '):
+                    doc.add_heading(line[5:], level=4)
+                else:
+                    doc.add_paragraph(line)
+            
+            doc.save(output_path)
+            return True
+            
+        except Exception as e:
+            print(f"Error saving DOC: {e}")
+            return False
     
     def generate_consolidated_document(self, keyvalues_path, output_dir):
         """Generate single consolidated document"""
@@ -479,15 +565,36 @@ class LlamaDocGenerator:
             document_content = self._call_llama_api(prompt)
             
             if document_content:
-                # Save as text file
-                output_path = os.path.join(output_dir, 'consolidated_incident_report.txt')
-                with open(output_path, 'w', encoding='utf-8') as f:
+                # Save in multiple formats
+                base_name = 'consolidated_incident_report'
+                
+                # Save as TXT
+                txt_path = os.path.join(output_dir, f'{base_name}.txt')
+                with open(txt_path, 'w', encoding='utf-8') as f:
                     f.write(document_content)
                 
-                print(f"Consolidated document saved to {output_path}")
+                # Save as PDF
+                pdf_path = os.path.join(output_dir, f'{base_name}.pdf')
+                pdf_success = self.save_as_pdf(document_content, pdf_path)
+                
+                # Save as DOC
+                doc_path = os.path.join(output_dir, f'{base_name}.doc')
+                doc_success = self.save_as_doc(document_content, doc_path)
+                
+                print(f"Documents saved:")
+                print(f"  ✅ TXT: {txt_path}")
+                if pdf_success:
+                    print(f"  ✅ PDF: {pdf_path}")
+                else:
+                    print(f"  ❌ PDF: Failed to generate")
+                if doc_success:
+                    print(f"  ✅ DOC: {doc_path}")
+                else:
+                    print(f"  ❌ DOC: Failed to generate")
+                
                 return True
             else:
-                print("Failed to generate document")
+                print("Failed to generate document content")
                 return False
                 
         except Exception as e:
@@ -524,19 +631,34 @@ class LlamaDocGenerator:
                 if document_content:
                     # Create filename
                     ticket_id = incident.get('ticket_id', f'incident_{idx+1}')
-                    filename = f"{ticket_id}_report.txt"
-                    output_path = os.path.join(output_dir, filename)
+                    safe_ticket_id = re.sub(r'[^\w\-_]', '_', ticket_id)
                     
-                    # Save document
-                    with open(output_path, 'w', encoding='utf-8') as f:
+                    # Save in multiple formats
+                    txt_path = os.path.join(output_dir, f'{safe_ticket_id}_report.txt')
+                    pdf_path = os.path.join(output_dir, f'{safe_ticket_id}_report.pdf')
+                    doc_path = os.path.join(output_dir, f'{safe_ticket_id}_report.doc')
+                    
+                    # Save as TXT
+                    with open(txt_path, 'w', encoding='utf-8') as f:
                         f.write(document_content)
                     
-                    generated_files.append(output_path)
-                    print(f"  - Generated: {filename}")
+                    # Save as PDF
+                    pdf_success = self.save_as_pdf(document_content, pdf_path)
+                    
+                    # Save as DOC
+                    doc_success = self.save_as_doc(document_content, doc_path)
+                    
+                    generated_files.extend([txt_path])
+                    if pdf_success:
+                        generated_files.append(pdf_path)
+                    if doc_success:
+                        generated_files.append(doc_path)
+                    
+                    print(f"  - Generated: {safe_ticket_id}_report (TXT/PDF/DOC)")
                 else:
                     print(f"  - Failed to generate document for incident {idx + 1}")
             
-            print(f"Generated {len(generated_files)} individual documents")
+            print(f"Generated {len(generated_files)} document files")
             return True
             
         except Exception as e:
@@ -560,6 +682,7 @@ class LlamaDocGenerator:
             - Description: {incident.get('description', 'N/A')}
             - Original Subject: {incident.get('original_subject', 'N/A')}
             - Sender: {incident.get('original_sender', 'N/A')}
+            - Urgency Indicators: {', '.join(incident.get('urgency_indicators', []))}
             """
         
         prompt = f"""
@@ -568,7 +691,7 @@ class LlamaDocGenerator:
         # IT Incident Report - {datetime.now().strftime('%Y-%m-%d')}
         
         ## Executive Summary
-        Provide an overview of all {len(incidents)} incidents processed, key statistics, and overall impact assessment.
+        Provide an overview of all {len(incidents)} incidents processed, key statistics, severity distribution, and overall impact assessment on business operations.
         
         ## Incident Details
         
@@ -579,27 +702,36 @@ class LlamaDocGenerator:
         ### Incident [Number]: [Ticket ID or Type]
         
         #### 1. Introduction/Summary
-        Brief overview of the incident including what happened and when.
+        Brief overview of the incident including what happened, when it occurred, and initial impact assessment.
         
         #### 2. Root Cause and Impacted Systems
-        Analysis of the root cause and detailed list of affected systems and services.
+        Detailed analysis of the root cause and comprehensive list of affected systems, services, and business processes.
         
         #### 3. Timeline of Events and Resolution
-        Chronological timeline of the incident from detection to resolution.
+        Chronological timeline of the incident from initial detection through resolution or current status.
         
         #### 4. Monitoring and Escalation
-        How the incident was detected, monitored, and escalated through the organization.
+        How the incident was detected, monitored, escalated through the organization, and communication protocols followed.
         
         #### 5. Final Status/Summary
-        Current status, resolution details, and any follow-up actions required.
+        Current status, resolution details, lessons learned, and any follow-up actions required.
         
         ## Overall Analysis
-        Provide analysis of common patterns, trends, and recommendations for preventing similar incidents.
+        Provide comprehensive analysis of common patterns, trends, root causes, and system vulnerabilities identified across all incidents.
         
         ## Recommendations
-        List specific recommendations for improving incident response and prevention.
+        List specific, actionable recommendations for:
+        - Preventing similar incidents
+        - Improving incident response procedures
+        - Enhancing monitoring and alerting
+        - Strengthening system resilience
         
-        Make it professional, detailed, and suitable for management review.
+        ## Appendix
+        - Contact information for responsible teams
+        - Reference documentation
+        - Related incident tickets
+        
+        Make it professional, detailed, and suitable for executive and technical team review.
         """
         
         return prompt
@@ -629,21 +761,50 @@ class LlamaDocGenerator:
         # Incident Report: {incident.get('ticket_id', 'Unknown Incident')}
         
         ## 1. Introduction/Summary
-        Provide a clear summary of what happened, when it occurred, and the initial impact.
+        Provide a clear, concise summary of what happened, when it occurred, initial symptoms, and immediate impact on business operations.
         
         ## 2. Root Cause and Impacted Systems
-        Analyze the root cause of the incident and provide detailed information about affected systems and services.
+        Conduct thorough analysis of the root cause, contributing factors, and provide detailed information about all affected systems, services, and business processes.
         
         ## 3. Timeline of Events and Resolution
-        Create a chronological timeline from incident detection through resolution (or current status).
+        Create a comprehensive chronological timeline from incident detection through resolution, including:
+        - Detection time and method
+        - Initial response actions
+        - Escalation points
+        - Resolution steps
+        - Verification procedures
         
         ## 4. Monitoring and Escalation
-        Describe how the incident was detected, monitored, and escalated through the support organization.
+        Describe in detail:
+        - How the incident was detected and by whom
+        - Monitoring systems involved
+        - Escalation procedures followed
+        - Communication protocols used
+        - Stakeholder notifications
         
         ## 5. Final Status/Summary
-        Provide the current status, resolution details, lessons learned, and any follow-up actions required.
+        Provide comprehensive information about:
+        - Current incident status
+        - Resolution details and verification
+        - Lessons learned
+        - Follow-up actions required
+        - Preventive measures implemented
         
-        Make it detailed, professional, and actionable for technical teams.
+        ## 6. Technical Details
+        Include relevant technical information such as:
+        - System configurations involved
+        - Error messages and logs
+        - Performance metrics
+        - Recovery procedures used
+        
+        ## 7. Recommendations
+        Provide specific recommendations for:
+        - Preventing similar incidents
+        - Improving response procedures
+        - Enhancing monitoring
+        - System improvements
+        
+        Make it detailed, professional, and actionable for technical teams and management.
         """
         
         return prompt
@@ -662,13 +823,12 @@ class LlamaDocGenerator:
             return False
 
 if __name__ == "__main__":
+    import re
     generator = LlamaDocGenerator()
     
     # Generate consolidated document
     generator.generate_documents('data/extracted_keyvalues.json', 'data/generated_docs/', 'consolidated')
 
-
-####evaluator.py
 
 import pandas as pd
 import numpy as np
@@ -751,7 +911,7 @@ class EmailClassificationEvaluator:
             print("No matching email IDs found between manual labels and predictions")
             print("Manual label email_ids:", self.manual_data['email_id'].tolist()[:10])
             print("Prediction email_ids:", pred_df['email_id'].tolist()[:10])
-            return None, None
+            return None, None, None
         
         y_true = merged_data['human_label'].values
         y_pred = merged_data['predicted_label'].values
@@ -825,6 +985,56 @@ class EmailClassificationEvaluator:
             for _, row in false_negatives.head(5).iterrows():
                 print(f"  - Email {row['email_id']}: {row.get('subject', 'No subject')[:50]}...")
     
+    def generate_detailed_report(self, merged_data, output_dir):
+        """Generate detailed evaluation report"""
+        try:
+            report_path = os.path.join(output_dir, 'detailed_evaluation_report.txt')
+            
+            with open(report_path, 'w') as f:
+                f.write("DETAILED EVALUATION REPORT\n")
+                f.write("="*50 + "\n\n")
+                
+                # Overall statistics
+                f.write("OVERALL STATISTICS\n")
+                f.write("-"*20 + "\n")
+                f.write(f"Total emails evaluated: {len(merged_data)}\n")
+                f.write(f"Correctly classified: {len(merged_data[merged_data['human_label'] == merged_data['predicted_label']])}\n")
+                f.write(f"Incorrectly classified: {len(merged_data[merged_data['human_label'] != merged_data['predicted_label']])}\n\n")
+                
+                # Breakdown by incident type
+                f.write("BREAKDOWN BY INCIDENT TYPE\n")
+                f.write("-"*30 + "\n")
+                incident_breakdown = merged_data.groupby('incident_type').agg({
+                    'human_label': 'count',
+                    'predicted_label': lambda x: (x == merged_data.loc[x.index, 'human_label']).sum()
+                }).rename(columns={'human_label': 'total', 'predicted_label': 'correct'})
+                
+                for incident_type, row in incident_breakdown.iterrows():
+                    accuracy = row['correct'] / row['total'] if row['total'] > 0 else 0
+                    f.write(f"{incident_type}: {row['correct']}/{row['total']} ({accuracy:.2%})\n")
+                
+                f.write("\n")
+                
+                # Detailed error analysis
+                errors = merged_data[merged_data['human_label'] != merged_data['predicted_label']]
+                if len(errors) > 0:
+                    f.write("DETAILED ERROR ANALYSIS\n")
+                    f.write("-"*25 + "\n")
+                    
+                    for _, row in errors.iterrows():
+                        f.write(f"Email ID: {row['email_id']}\n")
+                        f.write(f"Subject: {row.get('subject', 'N/A')}\n")
+                        f.write(f"Actual Label: {row['human_label']}\n")
+                        f.write(f"Predicted Label: {row['predicted_label']}\n")
+                        f.write(f"Incident Type: {row['incident_type']}\n")
+                        f.write(f"Severity: {row['severity']}\n")
+                        f.write("-"*40 + "\n")
+            
+            print(f"Detailed report saved to {report_path}")
+            
+        except Exception as e:
+            print(f"Error generating detailed report: {e}")
+    
     def evaluate(self, keyvalues_path, output_dir='data/'):
         """Main evaluation function"""
         print("Starting evaluation...")
@@ -858,6 +1068,9 @@ class EmailClassificationEvaluator:
         
         # Analyze errors
         self.analyze_errors(merged_data)
+        
+        # Generate detailed report
+        self.generate_detailed_report(merged_data, output_dir)
         
         # Compile results
         self.evaluation_results = {
@@ -912,12 +1125,23 @@ class EmailClassificationEvaluator:
         pred_dist = self.evaluation_results['label_distribution']['predicted_labels']
         print(f"Actual - Not Important: {true_dist['not_important']}, Important: {true_dist['important']}")
         print(f"Predicted - Not Important: {pred_dist['not_important']}, Important: {pred_dist['important']}")
+        
+        # Performance interpretation
+        print("\nPerformance Interpretation:")
+        accuracy = metrics['accuracy']
+        if accuracy >= 0.9:
+            print("🟢 Excellent performance")
+        elif accuracy >= 0.8:
+            print("🟡 Good performance")
+        elif accuracy >= 0.7:
+            print("🟠 Fair performance")
+        else:
+            print("🔴 Poor performance - consider model tuning")
 
 if __name__ == "__main__":
     evaluator = EmailClassificationEvaluator('data/manual_labels.csv')
     evaluator.evaluate('data/extracted_keyvalues.json', 'data/')
 
-####main.py
 
 import os
 import sys
@@ -939,142 +1163,188 @@ def check_requirements():
         for file in missing_files:
             print(f"   - {file}")
         print("\nPlease ensure you have:")
-        print("1. .env file with LLAMA_API_KEY")
+        print("1. .env file with LLAMA_API_KEY and other configuration")
         print("2. data/emails.csv with columns: folder, subject, sender, received, body")
         return False
     
     return True
 
+def display_banner():
+    """Display application banner"""
+    print("="*80)
+    print("                    EMAIL-LLM-DOCS PIPELINE")
+    print("           Automated Email Analysis and Documentation Generation")
+    print("                    Using LLaMA-4-Scout-Instruct")
+    print("="*80)
+
 def main():
-    print("="*70)
-    print("EMAIL-LLM-DOCS PIPELINE")
-    print("Automated Email Analysis and Documentation Generation")
-    print("="*70)
+    display_banner()
     
     # Check requirements
     if not check_requirements():
         sys.exit(1)
     
-    # Create data directory if it doesn't exist
+    # Create data directories if they don't exist
     os.makedirs('data', exist_ok=True)
     os.makedirs('data/generated_docs', exist_ok=True)
     
-    # Step 1: Smart Flagging (Key-Value Extraction)
-    print("\n--- STEP 1: Smart Flagging (Key-Value Extraction) ---")
-    print("Processing emails and extracting key information...")
-    
-    flagger = SmartFlagger()
-    
-    if flagger.process_emails('data/emails.csv', 'data/extracted_keyvalues.json'):
-        print("✅ Smart flagging completed successfully")
-    else:
-        print("❌ Smart flagging failed")
-        sys.exit(1)
-    
-    # Step 2: Document Generation
-    print("\n--- STEP 2: Document Generation ---")
-    print("Generating documentation from extracted key-value pairs...")
-    
-    doc_generator = LlamaDocGenerator()
-    
-    # Choose generation mode
-    print("\nChoose document generation mode:")
-    print("1. Consolidated (single document with all incidents)")
-    print("2. Individual (separate document for each incident)")
-    
-    while True:
-        choice = input("Enter choice (1 or 2): ").strip()
-        if choice == '1':
-            generation_mode = 'consolidated'
-            break
-        elif choice == '2':
-            generation_mode = 'individual'
-            break
-        else:
-            print("Invalid choice. Please enter 1 or 2.")
-    
-    print(f"Using {generation_mode} mode...")
-    
-    if doc_generator.generate_documents('data/extracted_keyvalues.json', 'data/generated_docs/', generation_mode):
-        print("✅ Document generation completed successfully")
-    else:
-        print("❌ Document generation failed")
-    
-    # Step 3: Evaluation (if manual labels exist)
-    print("\n--- STEP 3: Evaluation ---")
-    
-    if os.path.exists('data/manual_labels.csv'):
-        print("Manual labels found. Starting evaluation...")
-        evaluator = EmailClassificationEvaluator('data/manual_labels.csv')
+    try:
+        # Step 1: Smart Flagging (Key-Value Extraction)
+        print("\n🔍 STEP 1: Smart Flagging (Key-Value Extraction)")
+        print("-" * 60)
+        print("Processing emails and extracting key information using LLaMA...")
         
-        if evaluator.evaluate('data/extracted_keyvalues.json', 'data/'):
-            print("✅ Evaluation completed successfully")
+        flagger = SmartFlagger()
+        
+        if flagger.process_emails('data/emails.csv', 'data/extracted_keyvalues.json'):
+            print("✅ Smart flagging completed successfully")
         else:
-            print("❌ Evaluation failed")
-    else:
-        print("⚠️  Manual labels not found. Skipping evaluation.")
-        print("   To enable evaluation:")
-        print("   1. Create data/manual_labels.csv with columns: email_id, folder, subject, sender, received, body, human_label")
-        print("   2. Add human_label column with 1 for important emails, 0 for not important")
-    
-    # Step 4: Show Results
-    print("\n--- PIPELINE RESULTS ---")
-    print("="*50)
-    
-    # Show generated files
-    print("Generated Files:")
-    
-    files_to_check = [
-        ('data/extracted_keyvalues.json', 'Key-value pairs extracted from emails'),
-        ('data/generated_docs/consolidated_incident_report.txt', 'Consolidated incident report'),
-        ('data/evaluation_results.json', 'Evaluation metrics and results'),
-        ('data/confusion_matrix.png', 'Confusion matrix visualization')
-    ]
-    
-    for file_path, description in files_to_check:
-        if os.path.exists(file_path):
-            print(f"✅ {file_path} - {description}")
+            print("❌ Smart flagging failed")
+            sys.exit(1)
+        
+        # Step 2: Document Generation
+        print("\n📄 STEP 2: Document Generation")
+        print("-" * 60)
+        print("Generating documentation from extracted key-value pairs...")
+        
+        doc_generator = LlamaDocGenerator()
+        
+        # Choose generation mode
+        print("\nChoose document generation mode:")
+        print("1. Consolidated (single document with all incidents)")
+        print("2. Individual (separate document for each incident)")
+        print("3. Both (generate both consolidated and individual)")
+        
+        while True:
+            choice = input("Enter choice (1, 2, or 3): ").strip()
+            if choice == '1':
+                generation_modes = ['consolidated']
+                break
+            elif choice == '2':
+                generation_modes = ['individual']
+                break
+            elif choice == '3':
+                generation_modes = ['consolidated', 'individual']
+                break
+            else:
+                print("Invalid choice. Please enter 1, 2, or 3.")
+        
+        # Generate documents
+        success = True
+        for mode in generation_modes:
+            print(f"\nGenerating {mode} documents...")
+            if doc_generator.generate_documents('data/extracted_keyvalues.json', 'data/generated_docs/', mode):
+                print(f"✅ {mode.title()} document generation completed successfully")
+            else:
+                print(f"❌ {mode.title()} document generation failed")
+                success = False
+        
+        if not success:
+            print("⚠️  Some document generation failed, but continuing...")
+        
+        # Step 3: Evaluation (if manual labels exist)
+        print("\n📊 STEP 3: Evaluation")
+        print("-" * 60)
+        
+        if os.path.exists('data/manual_labels.csv'):
+            print("Manual labels found. Starting evaluation...")
+            evaluator = EmailClassificationEvaluator('data/manual_labels.csv')
+            
+            if evaluator.evaluate('data/extracted_keyvalues.json', 'data/'):
+                print("✅ Evaluation completed successfully")
+            else:
+                print("❌ Evaluation failed")
         else:
-            print(f"❌ {file_path} - {description}")
-    
-    # Show individual docs if generated
-    if os.path.exists('data/generated_docs/'):
-        individual_docs = [f for f in os.listdir('data/generated_docs/') if f.endswith('_report.txt')]
-        if individual_docs:
-            print(f"✅ {len(individual_docs)} individual incident reports generated")
-    
-    print("\n" + "="*70)
-    print("PIPELINE COMPLETED SUCCESSFULLY!")
-    print("="*70)
-    
-    # Show next steps
-    print("\nNext Steps:")
-    print("1. Review extracted key-value pairs in data/extracted_keyvalues.json")
-    print("2. Check generated documentation in data/generated_docs/")
-    if os.path.exists('data/evaluation_results.json'):
-        print("3. Review evaluation results and confusion matrix")
-    print("4. Create/update manual_labels.csv for better evaluation")
+            print("⚠️  Manual labels not found. Skipping evaluation.")
+            print("   To enable evaluation:")
+            print("   1. Create data/manual_labels.csv with columns:")
+            print("      email_id, folder, subject, sender, received, body, human_label")
+            print("   2. Add human_label column with 1 for important emails, 0 for not important")
+        
+        # Step 4: Show Results
+        print("\n📋 PIPELINE RESULTS")
+        print("=" * 60)
+        
+        # Show generated files
+        print("Generated Files:")
+        
+        files_to_check = [
+            ('data/extracted_keyvalues.json', 'Key-value pairs extracted from emails'),
+            ('data/generated_docs/consolidated_incident_report.txt', 'Consolidated incident report (TXT)'),
+            ('data/generated_docs/consolidated_incident_report.pdf', 'Consolidated incident report (PDF)'),
+            ('data/generated_docs/consolidated_incident_report.doc', 'Consolidated incident report (DOC)'),
+            ('data/evaluation_results.json', 'Evaluation metrics and results'),
+            ('data/confusion_matrix.png', 'Confusion matrix visualization'),
+            ('data/detailed_evaluation_report.txt', 'Detailed evaluation report')
+        ]
+        
+        for file_path, description in files_to_check:
+            if os.path.exists(file_path):
+                file_size = os.path.getsize(file_path)
+                print(f"✅ {file_path} ({file_size:,} bytes) - {description}")
+            else:
+                print(f"❌ {file_path} - {description}")
+        
+        # Show individual docs if generated
+        if os.path.exists('data/generated_docs/'):
+            individual_docs = [f for f in os.listdir('data/generated_docs/') if f.endswith('_report.txt')]
+            if individual_docs:
+                print(f"✅ {len(individual_docs)} individual incident reports generated")
+                
+                # Show PDF and DOC versions
+                pdf_docs = [f for f in os.listdir('data/generated_docs/') if f.endswith('_report.pdf')]
+                doc_docs = [f for f in os.listdir('data/generated_docs/') if f.endswith('_report.doc')]
+                
+                if pdf_docs:
+                    print(f"✅ {len(pdf_docs)} individual PDF reports generated")
+                if doc_docs:
+                    print(f"✅ {len(doc_docs)} individual DOC reports generated")
+        
+        print("\n" + "=" * 80)
+        print("                    PIPELINE COMPLETED SUCCESSFULLY!")
+        print("=" * 80)
+        
+        # Show next steps
+        print("\n🎯 Next Steps:")
+        print("1. Review extracted key-value pairs in data/extracted_keyvalues.json")
+        print("2. Check generated documentation in data/generated_docs/")
+        print("   - TXT files for plain text")
+        print("   - PDF files for formatted documents")
+        print("   - DOC files for Microsoft Word format")
+        if os.path.exists('data/evaluation_results.json'):
+            print("3. Review evaluation results and confusion matrix")
+            print("4. Check detailed evaluation report for error analysis")
+        print("5. Create/update manual_labels.csv for better evaluation")
+        print("6. Fine-tune smart_flagger parameters if needed")
+        
+        # Show summary statistics
+        if os.path.exists('data/extracted_keyvalues.json'):
+            with open('data/extracted_keyvalues.json', 'r') as f:
+                data = json.load(f)
+                important_count = sum(1 for item in data if item.get('is_important', False))
+                print(f"\n📈 Summary Statistics:")
+                print(f"   Total emails processed: {len(data)}")
+                print(f"   Important emails identified: {important_count}")
+                print(f"   Classification rate: {important_count/len(data)*100:.1f}%")
+        
+    except KeyboardInterrupt:
+        print("\n\n⚠️  Pipeline interrupted by user")
+        sys.exit(1)
+    except Exception as e:
+        print(f"\n❌ Pipeline failed with error: {e}")
+        sys.exit(1)
 
 if __name__ == "__main__":
+    import json
     main()
 
 
-email-llm-docs/
-│
-├── data/                                  
-│   ├── emails.csv                         # Raw email data (folder, subject, sender, received, body)
-│   ├── manual_labels.csv                  # Human labels (email_id, folder, subject, sender, received, body, human_label)
-│   ├── extracted_keyvalues.json           # Key-value pairs extracted by smart_flagger
-│   ├── evaluation_results.json            # Evaluation metrics
-│   └── generated_docs/                    
-│       └── consolidated_incident_report.txt
-│
-├── src/                                   
-│   ├── smart_flagger.py                   # Main core file - extracts key-value pairs
-│   ├── llama_doc_generator.py             # Generates documentation
-│   └── evaluator.py                       # Evaluation with confusion matrix
-│
-├── .env                                   # API configuration
-├── main.py                                # Main orchestration
-├── requirements.txt                       # Dependencies
-└── README.md                              # Documentation
+python-dotenv==0.19.2
+pandas==1.3.5
+requests==2.27.1
+scikit-learn==1.0.2
+matplotlib==3.5.3
+seaborn==0.11.2
+numpy==1.21.6
+reportlab==3.6.0
+python-docx==0.8.11
