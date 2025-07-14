@@ -24,3 +24,461 @@ beautifulsoup4==4.11.2
 # Testing framework
 pytest==7.2.2
 pytest-cov==4.0.0
+
+
+import json
+import os
+import requests
+import time
+from datetime import datetime
+from dotenv import load_dotenv
+from reportlab.lib.pagesizes import letter
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.units import inch
+from docx import Document
+from docx.shared import Inches
+
+load_dotenv()
+
+class LlamaDocGenerator:
+    def __init__(self):
+        self.api_key = os.getenv('LLAMA_API_KEY')
+        self.model_name = os.getenv('LLAMA_MODEL', 'llama-4-scout-instruct')
+        self.temperature = float(os.getenv('TEMPERATURE', '0.3'))
+        self.api_url = os.getenv('API_ENDPOINT', 'https://api.replicate.com/v1/predictions')
+        
+        if not self.api_key:
+            raise ValueError("LLAMA_API_KEY not found in .env file")
+        
+        print(f"Initialized LlamaDocGenerator with model: {self.model_name}")
+    
+    def _call_llama_api(self, prompt):
+        """Call LLaMA API"""
+        headers = {
+            'Authorization': f'Token {self.api_key}',
+            'Content-Type': 'application/json'
+        }
+        
+        data = {
+            'version': self.model_name,
+            'input': {
+                'prompt': prompt,
+                'max_tokens': 2000,
+                'temperature': self.temperature
+            }
+        }
+        
+        try:
+            response = requests.post(self.api_url, headers=headers, json=data)
+            response.raise_for_status()
+            result = response.json()
+            
+            # Handle Replicate's async response
+            if 'output' in result:
+                return ''.join(result['output'])
+            elif 'id' in result:
+                return self._get_prediction_result(result['id'])
+            else:
+                return None
+                
+        except Exception as e:
+            print(f"LLaMA API error: {e}")
+            return None
+    
+    def _get_prediction_result(self, prediction_id):
+        """Get result from async prediction"""
+        base_url = self.api_url.replace('/predictions', '')
+        get_url = f"{base_url}/predictions/{prediction_id}"
+        
+        headers = {'Authorization': f'Token {self.api_key}'}
+        
+        # Poll for result (max 60 seconds)
+        for _ in range(60):
+            try:
+                response = requests.get(get_url, headers=headers)
+                result = response.json()
+                
+                if result.get('status') == 'succeeded':
+                    return ''.join(result.get('output', []))
+                elif result.get('status') == 'failed':
+                    print(f"Prediction failed: {result.get('error', 'Unknown error')}")
+                    return None
+                
+                time.sleep(1)
+            except Exception as e:
+                print(f"Error polling result: {e}")
+                return None
+        
+        print("Prediction timed out")
+        return None
+    
+    def save_as_pdf(self, content, output_path):
+        """Save content as PDF"""
+        try:
+            doc = SimpleDocTemplate(output_path, pagesize=letter,
+                                  rightMargin=72, leftMargin=72,
+                                  topMargin=72, bottomMargin=18)
+            
+            styles = getSampleStyleSheet()
+            story = []
+            
+            # Add title style
+            title_style = ParagraphStyle(
+                'CustomTitle',
+                parent=styles['Heading1'],
+                fontSize=16,
+                spaceAfter=30,
+                alignment=1  # Center alignment
+            )
+            
+            # Process content
+            lines = content.split('\n')
+            for line in lines:
+                line = line.strip()
+                if not line:
+                    story.append(Spacer(1, 12))
+                    continue
+                
+                # Check if it's a heading
+                if line.startswith('# '):
+                    story.append(Paragraph(line[2:], title_style))
+                elif line.startswith('## '):
+                    story.append(Paragraph(line[3:], styles['Heading2']))
+                elif line.startswith('### '):
+                    story.append(Paragraph(line[4:], styles['Heading3']))
+                elif line.startswith('#### '):
+                    story.append(Paragraph(line[5:], styles['Heading4']))
+                else:
+                    story.append(Paragraph(line, styles['Normal']))
+                
+                story.append(Spacer(1, 6))
+            
+            doc.build(story)
+            return True
+            
+        except Exception as e:
+            print(f"Error saving PDF: {e}")
+            return False
+    
+    def save_as_doc(self, content, output_path):
+        """Save content as DOC"""
+        try:
+            doc = Document()
+            
+            # Add title
+            title = doc.add_heading('IT Incident Report', 0)
+            title.alignment = 1  # Center alignment
+            
+            # Process content
+            lines = content.split('\n')
+            for line in lines:
+                line = line.strip()
+                if not line:
+                    continue
+                
+                # Check if it's a heading
+                if line.startswith('# '):
+                    doc.add_heading(line[2:], level=1)
+                elif line.startswith('## '):
+                    doc.add_heading(line[3:], level=2)
+                elif line.startswith('### '):
+                    doc.add_heading(line[4:], level=3)
+                elif line.startswith('#### '):
+                    doc.add_heading(line[5:], level=4)
+                else:
+                    doc.add_paragraph(line)
+            
+            doc.save(output_path)
+            return True
+            
+        except Exception as e:
+            print(f"Error saving DOC: {e}")
+            return False
+    
+    def generate_consolidated_document(self, keyvalues_path, output_dir):
+        """Generate single consolidated document"""
+        try:
+            # Load key-value pairs
+            with open(keyvalues_path, 'r') as f:
+                key_values = json.load(f)
+            
+            # Filter important incidents only
+            important_incidents = [kv for kv in key_values if kv.get('is_important', False)]
+            
+            if not important_incidents:
+                print("No important incidents found")
+                return False
+            
+            print(f"Generating consolidated document for {len(important_incidents)} important incidents...")
+            
+            # Create consolidated prompt
+            prompt = self._create_consolidated_prompt(important_incidents)
+            
+            # Generate document
+            document_content = self._call_llama_api(prompt)
+            
+            if document_content:
+                # Save in multiple formats
+                base_name = 'consolidated_incident_report'
+                
+                # Save as TXT
+                txt_path = os.path.join(output_dir, f'{base_name}.txt')
+                with open(txt_path, 'w', encoding='utf-8') as f:
+                    f.write(document_content)
+                
+                # Save as PDF
+                pdf_path = os.path.join(output_dir, f'{base_name}.pdf')
+                pdf_success = self.save_as_pdf(document_content, pdf_path)
+                
+                # Save as DOC
+                doc_path = os.path.join(output_dir, f'{base_name}.doc')
+                doc_success = self.save_as_doc(document_content, doc_path)
+                
+                print(f"Documents saved:")
+                print(f"  ✅ TXT: {txt_path}")
+                if pdf_success:
+                    print(f"  ✅ PDF: {pdf_path}")
+                else:
+                    print(f"  ❌ PDF: Failed to generate")
+                if doc_success:
+                    print(f"  ✅ DOC: {doc_path}")
+                else:
+                    print(f"  ❌ DOC: Failed to generate")
+                
+                return True
+            else:
+                print("Failed to generate document content")
+                return False
+                
+        except Exception as e:
+            print(f"Error generating consolidated document: {e}")
+            return False
+    
+    def generate_individual_documents(self, keyvalues_path, output_dir):
+        """Generate individual documents for each incident"""
+        try:
+            # Load key-value pairs
+            with open(keyvalues_path, 'r') as f:
+                key_values = json.load(f)
+            
+            # Filter important incidents only
+            important_incidents = [kv for kv in key_values if kv.get('is_important', False)]
+            
+            if not important_incidents:
+                print("No important incidents found")
+                return False
+            
+            print(f"Generating individual documents for {len(important_incidents)} incidents...")
+            
+            generated_files = []
+            
+            for idx, incident in enumerate(important_incidents):
+                print(f"Generating document {idx + 1}/{len(important_incidents)}")
+                
+                # Create individual prompt
+                prompt = self._create_individual_prompt(incident)
+                
+                # Generate document
+                document_content = self._call_llama_api(prompt)
+                
+                if document_content:
+                    # Create filename
+                    ticket_id = incident.get('ticket_id', f'incident_{idx+1}')
+                    safe_ticket_id = re.sub(r'[^\w\-_]', '_', ticket_id)
+                    
+                    # Save in multiple formats
+                    txt_path = os.path.join(output_dir, f'{safe_ticket_id}_report.txt')
+                    pdf_path = os.path.join(output_dir, f'{safe_ticket_id}_report.pdf')
+                    doc_path = os.path.join(output_dir, f'{safe_ticket_id}_report.doc')
+                    
+                    # Save as TXT
+                    with open(txt_path, 'w', encoding='utf-8') as f:
+                        f.write(document_content)
+                    
+                    # Save as PDF
+                    pdf_success = self.save_as_pdf(document_content, pdf_path)
+                    
+                    # Save as DOC
+                    doc_success = self.save_as_doc(document_content, doc_path)
+                    
+                    generated_files.extend([txt_path])
+                    if pdf_success:
+                        generated_files.append(pdf_path)
+                    if doc_success:
+                        generated_files.append(doc_path)
+                    
+                    print(f"  - Generated: {safe_ticket_id}_report (TXT/PDF/DOC)")
+                else:
+                    print(f"  - Failed to generate document for incident {idx + 1}")
+            
+            print(f"Generated {len(generated_files)} document files")
+            return True
+            
+        except Exception as e:
+            print(f"Error generating individual documents: {e}")
+            return False
+    
+    def _create_consolidated_prompt(self, incidents):
+        """Create prompt for consolidated document"""
+        incidents_summary = ""
+        for i, incident in enumerate(incidents, 1):
+            incidents_summary += f"""
+            Incident {i}:
+            - Email ID: {incident.get('email_id', 'N/A')}
+            - Ticket ID: {incident.get('ticket_id', 'N/A')}
+            - Type: {incident.get('incident_type', 'N/A')}
+            - Severity: {incident.get('severity', 'N/A')}
+            - Affected Systems: {', '.join(incident.get('affected_systems', []))}
+            - Status: {incident.get('status', 'N/A')}
+            - Impact Level: {incident.get('impact_level', 'N/A')}
+            - Assigned Team: {incident.get('assigned_team', 'N/A')}
+            - Description: {incident.get('description', 'N/A')}
+            - Original Subject: {incident.get('original_subject', 'N/A')}
+            - Sender: {incident.get('original_sender', 'N/A')}
+            - Urgency Indicators: {', '.join(incident.get('urgency_indicators', []))}
+            """
+        
+        prompt = f"""
+        Generate a comprehensive IT incident report with the following structure:
+        
+        # IT Incident Report - {datetime.now().strftime('%Y-%m-%d')}
+        
+        ## Executive Summary
+        Provide an overview of all {len(incidents)} incidents processed, key statistics, severity distribution, and overall impact assessment on business operations.
+        
+        ## Incident Details
+        
+        {incidents_summary}
+        
+        For each incident above, create a detailed section with:
+        
+        ### Incident [Number]: [Ticket ID or Type]
+        
+        #### 1. Introduction/Summary
+        Brief overview of the incident including what happened, when it occurred, and initial impact assessment.
+        
+        #### 2. Root Cause and Impacted Systems
+        Detailed analysis of the root cause and comprehensive list of affected systems, services, and business processes.
+        
+        #### 3. Timeline of Events and Resolution
+        Chronological timeline of the incident from initial detection through resolution or current status.
+        
+        #### 4. Monitoring and Escalation
+        How the incident was detected, monitored, escalated through the organization, and communication protocols followed.
+        
+        #### 5. Final Status/Summary
+        Current status, resolution details, lessons learned, and any follow-up actions required.
+        
+        ## Overall Analysis
+        Provide comprehensive analysis of common patterns, trends, root causes, and system vulnerabilities identified across all incidents.
+        
+        ## Recommendations
+        List specific, actionable recommendations for:
+        - Preventing similar incidents
+        - Improving incident response procedures
+        - Enhancing monitoring and alerting
+        - Strengthening system resilience
+        
+        ## Appendix
+        - Contact information for responsible teams
+        - Reference documentation
+        - Related incident tickets
+        
+        Make it professional, detailed, and suitable for executive and technical team review.
+        """
+        
+        return prompt
+    
+    def _create_individual_prompt(self, incident):
+        """Create prompt for individual incident document"""
+        prompt = f"""
+        Generate a detailed incident report for the following incident:
+        
+        Incident Details:
+        - Email ID: {incident.get('email_id', 'N/A')}
+        - Ticket ID: {incident.get('ticket_id', 'N/A')}
+        - Type: {incident.get('incident_type', 'N/A')}
+        - Severity: {incident.get('severity', 'N/A')}
+        - Affected Systems: {', '.join(incident.get('affected_systems', []))}
+        - Status: {incident.get('status', 'N/A')}
+        - Impact Level: {incident.get('impact_level', 'N/A')}
+        - Assigned Team: {incident.get('assigned_team', 'N/A')}
+        - Description: {incident.get('description', 'N/A')}
+        - Original Subject: {incident.get('original_subject', 'N/A')}
+        - Sender: {incident.get('original_sender', 'N/A')}
+        - Received: {incident.get('original_received', 'N/A')}
+        - Urgency Indicators: {', '.join(incident.get('urgency_indicators', []))}
+        
+        Create a structured report with these sections:
+        
+        # Incident Report: {incident.get('ticket_id', 'Unknown Incident')}
+        
+        ## 1. Introduction/Summary
+        Provide a clear, concise summary of what happened, when it occurred, initial symptoms, and immediate impact on business operations.
+        
+        ## 2. Root Cause and Impacted Systems
+        Conduct thorough analysis of the root cause, contributing factors, and provide detailed information about all affected systems, services, and business processes.
+        
+        ## 3. Timeline of Events and Resolution
+        Create a comprehensive chronological timeline from incident detection through resolution, including:
+        - Detection time and method
+        - Initial response actions
+        - Escalation points
+        - Resolution steps
+        - Verification procedures
+        
+        ## 4. Monitoring and Escalation
+        Describe in detail:
+        - How the incident was detected and by whom
+        - Monitoring systems involved
+        - Escalation procedures followed
+        - Communication protocols used
+        - Stakeholder notifications
+        
+        ## 5. Final Status/Summary
+        Provide comprehensive information about:
+        - Current incident status
+        - Resolution details and verification
+        - Lessons learned
+        - Follow-up actions required
+        - Preventive measures implemented
+        
+        ## 6. Technical Details
+        Include relevant technical information such as:
+        - System configurations involved
+        - Error messages and logs
+        - Performance metrics
+        - Recovery procedures used
+        
+        ## 7. Recommendations
+        Provide specific recommendations for:
+        - Preventing similar incidents
+        - Improving response procedures
+        - Enhancing monitoring
+        - System improvements
+        
+        Make it detailed, professional, and actionable for technical teams and management.
+        """
+        
+        return prompt
+    
+    def generate_documents(self, keyvalues_path, output_dir, mode='consolidated'):
+        """Main function to generate documents"""
+        # Create output directory if it doesn't exist
+        os.makedirs(output_dir, exist_ok=True)
+        
+        if mode == 'consolidated':
+            return self.generate_consolidated_document(keyvalues_path, output_dir)
+        elif mode == 'individual':
+            return self.generate_individual_documents(keyvalues_path, output_dir)
+        else:
+            print("Invalid mode. Use 'consolidated' or 'individual'")
+            return False
+
+if __name__ == "__main__":
+    import re
+    generator = LlamaDocGenerator()
+    
+    # Generate consolidated document
+    generator.generate_documents('data/extracted_keyvalues.json', 'data/generated_docs/', 'consolidated')
