@@ -21,6 +21,1446 @@ rouge-score==0.1.2
 # Text processing
 beautifulsoup4==4.11.2
 
-# Testing framework
-pytest==7.2.2
-pytest-cov==4.0.0
+
+
+import pandas as pd
+import json
+import re
+import os
+from dotenv import load_dotenv
+import requests
+import urllib3
+import warnings
+
+# Disable SSL warnings
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+warnings.filterwarnings('ignore', message='Unverified HTTPS request')
+
+load_dotenv()
+
+class SmartFlagger:
+    def __init__(self):
+        # Load all configuration from .env file
+        self.api_key = os.getenv('LLAMA_API_KEY')
+        self.model_name = os.getenv('LLAMA_MODEL', 'llama-4-scout-instruct')
+        self.temperature = float(os.getenv('TEMPERATURE', '0.3'))
+        self.api_url = os.getenv('API_ENDPOINT', 'https://api.copdev.azpriv-cloud.ubs.net/api/chat/completions')
+        
+        # Validate required configuration
+        if not self.api_key:
+            raise ValueError("LLAMA_API_KEY not found in .env file")
+        
+        print(f"Initialized SmartFlagger with model: {self.model_name}")
+        print(f"API Endpoint: {self.api_url}")
+        
+        # Keywords for importance detection
+        self.important_keywords = [
+            'urgent', 'critical', 'emergency', 'down', 'failed', 'error',
+            'incident', 'outage', 'alert', 'warning', 'issue', 'problem',
+            'security', 'breach', 'unauthorized', 'malware', 'virus', 'attack',
+            'compromise', 'threat', 'vulnerability', 'exploit', 'phishing'
+        ]
+    
+    def _call_openwebui_api(self, prompt):
+        """Call OpenWebUI API using chat completions format"""
+        headers = {
+            'Authorization': f'Bearer {self.api_key}',
+            'Content-Type': 'application/json'
+        }
+        
+        # OpenWebUI uses OpenAI-compatible format with messages array
+        data = {
+            'model': self.model_name,
+            'messages': [
+                {
+                    'role': 'user',
+                    'content': prompt
+                }
+            ],
+            'temperature': self.temperature,
+            'max_tokens': 800,
+            'stream': False
+        }
+        
+        try:
+            # Disable SSL verification
+            response = requests.post(
+                self.api_url, 
+                headers=headers, 
+                json=data,
+                verify=False,  # Disable SSL verification
+                timeout=60
+            )
+            
+            response.raise_for_status()
+            result = response.json()
+            
+            # Extract content from OpenAI-compatible response
+            if 'choices' in result and len(result['choices']) > 0:
+                return result['choices'][0]['message']['content']
+            else:
+                print(f"Unexpected response format: {result}")
+                return None
+                
+        except requests.exceptions.SSLError as e:
+            print(f"SSL Error (this should not happen with verify=False): {e}")
+            return None
+        except requests.exceptions.RequestException as e:
+            print(f"Request error: {e}")
+            return None
+        except Exception as e:
+            print(f"OpenWebUI API error: {e}")
+            return None
+    
+    def extract_key_values_from_email(self, email_row):
+        """Extract key-value pairs from email data"""
+        folder = str(email_row.get('folder', ''))
+        subject = str(email_row.get('subject', ''))
+        sender = str(email_row.get('sender', ''))
+        received = str(email_row.get('received', ''))
+        body = str(email_row.get('body', ''))
+        email_id = email_row.get('email_id', 0)
+        
+        # Combine all email data for comprehensive analysis
+        combined_text = f"""
+        Folder: {folder}
+        Subject: {subject}
+        Sender: {sender}
+        Received: {received}
+        Body: {body}
+        """
+        
+        # Create prompt for key-value extraction
+        prompt = f"""
+        Analyze this email and extract key information in JSON format:
+        
+        {combined_text}
+        
+        Extract these fields if present:
+        - ticket_id: Any ticket/incident ID (INC, TICKET, REQ, etc.)
+        - incident_type: Type of incident/alert (database, server, network, security, etc.)
+        - severity: Critical/High/Medium/Low
+        - affected_systems: List of affected systems/services
+        - timestamp: When the incident occurred
+        - status: Open/Closed/In Progress/Resolved
+        - assigned_team: Responsible team (Infrastructure, Security, Database, etc.)
+        - impact_level: Business impact (High/Medium/Low)
+        - description: Brief description of the issue
+        - is_important: true if this is an important IT incident/alert, false otherwise
+        - urgency_indicators: List of urgent keywords found
+        
+        Consider these as important:
+        - System outages, failures, errors
+        - Security incidents, breaches, alerts
+        - Critical infrastructure issues
+        - Production problems
+        - Emergency situations
+        
+        Return only valid JSON format without any additional text.
+        """
+        
+        # Call OpenWebUI API
+        api_response = self._call_openwebui_api(prompt)
+        
+        # Parse API response or use fallback
+        extracted_data = self._parse_api_response(api_response, combined_text)
+        
+        # Add original email data
+        extracted_data.update({
+            'email_id': email_id,
+            'original_folder': folder,
+            'original_subject': subject,
+            'original_sender': sender,
+            'original_received': received,
+            'original_body': body[:500]  # Truncate for storage
+        })
+        
+        return extracted_data
+    
+    def _parse_api_response(self, response, combined_text):
+        """Parse API response or use fallback extraction"""
+        try:
+            if response:
+                # Clean response and extract JSON
+                response_clean = response.strip()
+                json_match = re.search(r'\{.*\}', response_clean, re.DOTALL)
+                if json_match:
+                    json_str = json_match.group()
+                    parsed_data = json.loads(json_str)
+                    print("Successfully parsed API response")
+                    return parsed_data
+        except Exception as e:
+            print(f"Error parsing API response: {e}")
+        
+        # Fallback to manual extraction
+        print("Using fallback extraction...")
+        return self._fallback_extraction(combined_text)
+    
+    def _fallback_extraction(self, text):
+        """Fallback key-value extraction using regex and keywords"""
+        text_lower = text.lower()
+        
+        return {
+            'ticket_id': self._extract_ticket_id(text),
+            'incident_type': self._extract_incident_type(text),
+            'severity': self._extract_severity(text),
+            'affected_systems': self._extract_systems(text),
+            'timestamp': self._extract_timestamp(text),
+            'status': self._extract_status(text),
+            'assigned_team': self._extract_team(text),
+            'impact_level': self._assess_impact(text),
+            'description': self._extract_description(text),
+            'is_important': self._is_important(text_lower),
+            'urgency_indicators': self._find_urgency_indicators(text_lower)
+        }
+    
+    def _extract_ticket_id(self, text):
+        """Extract ticket ID from text"""
+        patterns = [
+            r'INC\d+', r'REQ\d+', r'TICKET[\s#]*(\d+)', 
+            r'ID[\s#]*(\d+)', r'#(\d+)', r'CASE\d+',
+            r'RITM\d+', r'CHG\d+', r'PRB\d+'
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, text, re.IGNORECASE)
+            if match:
+                return match.group()
+        return None
+    
+    def _extract_incident_type(self, text):
+        """Extract incident type"""
+        text_lower = text.lower()
+        types = {
+            'database': ['database', 'db', 'sql', 'mysql', 'postgresql', 'oracle'],
+            'server': ['server', 'host', 'machine', 'vm', 'virtual machine'],
+            'network': ['network', 'connectivity', 'dns', 'routing', 'firewall'],
+            'application': ['application', 'app', 'service', 'api', 'web service'],
+            'security': ['security', 'breach', 'unauthorized', 'malware', 'virus'],
+            'email': ['email', 'mail', 'smtp', 'exchange', 'outlook'],
+            'storage': ['storage', 'disk', 'backup', 'file system', 'nas'],
+            'performance': ['slow', 'performance', 'timeout', 'latency']
+        }
+        
+        for incident_type, keywords in types.items():
+            if any(keyword in text_lower for keyword in keywords):
+                return incident_type.title()
+        
+        return 'General'
+    
+    def _extract_severity(self, text):
+        """Extract severity level"""
+        text_lower = text.lower()
+        if any(word in text_lower for word in ['critical', 'emergency', 'urgent', 'p1']):
+            return 'Critical'
+        elif any(word in text_lower for word in ['high', 'important', 'priority', 'p2']):
+            return 'High'
+        elif any(word in text_lower for word in ['medium', 'moderate', 'warning', 'p3']):
+            return 'Medium'
+        else:
+            return 'Low'
+    
+    def _extract_systems(self, text):
+        """Extract affected systems"""
+        systems = []
+        system_keywords = [
+            'database', 'server', 'web', 'api', 'portal', 'gateway',
+            'email', 'exchange', 'active directory', 'dns', 'firewall',
+            'load balancer', 'proxy', 'vpn', 'backup', 'storage'
+        ]
+        
+        text_lower = text.lower()
+        for keyword in system_keywords:
+            if keyword in text_lower:
+                systems.append(keyword.title())
+        
+        return systems if systems else ['Unknown']
+    
+    def _extract_timestamp(self, text):
+        """Extract timestamp from text"""
+        timestamp_patterns = [
+            r'\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}',
+            r'\d{2}:\d{2}:\d{2}',
+            r'\d{1,2}/\d{1,2}/\d{4}',
+            r'\d{1,2}-\d{1,2}-\d{4}',
+            r'\d{4}/\d{2}/\d{2}'
+        ]
+        for pattern in timestamp_patterns:
+            match = re.search(pattern, text)
+            if match:
+                return match.group()
+        return None
+    
+    def _extract_status(self, text):
+        """Extract status from text"""
+        text_lower = text.lower()
+        if any(word in text_lower for word in ['resolved', 'closed', 'fixed', 'completed']):
+            return 'Resolved'
+        elif any(word in text_lower for word in ['in progress', 'working', 'investigating']):
+            return 'In Progress'
+        else:
+            return 'Open'
+    
+    def _extract_team(self, text):
+        """Extract assigned team"""
+        text_lower = text.lower()
+        teams = {
+            'infrastructure': ['infrastructure', 'infra', 'system admin', 'sysadmin'],
+            'database': ['database', 'dba', 'db team'],
+            'network': ['network', 'networking', 'net ops', 'netops'],
+            'security': ['security', 'infosec', 'cyber', 'soc'],
+            'application': ['application', 'dev', 'development', 'app team'],
+            'support': ['support', 'helpdesk', 'service desk', 'it support']
+        }
+        
+        for team, keywords in teams.items():
+            if any(keyword in text_lower for keyword in keywords):
+                return team.title()
+        
+        return 'General Support'
+    
+    def _assess_impact(self, text):
+        """Assess impact level"""
+        text_lower = text.lower()
+        if any(word in text_lower for word in ['critical', 'production', 'outage', 'down', 'offline']):
+            return 'High'
+        elif any(word in text_lower for word in ['warning', 'degraded', 'slow', 'performance']):
+            return 'Medium'
+        else:
+            return 'Low'
+    
+    def _extract_description(self, text):
+        """Extract brief description"""
+        sentences = text.split('.')
+        if sentences:
+            return sentences[0][:200].strip()
+        return text[:200].strip()
+    
+    def _is_important(self, text_lower):
+        """Determine if email is important"""
+        keyword_count = sum(1 for keyword in self.important_keywords if keyword in text_lower)
+        return keyword_count > 0
+    
+    def _find_urgency_indicators(self, text_lower):
+        """Find urgency indicators in text"""
+        found_indicators = []
+        for keyword in self.important_keywords:
+            if keyword in text_lower:
+                found_indicators.append(keyword)
+        return found_indicators
+    
+    def process_emails(self, csv_path, output_path):
+        """Process emails from CSV and generate key-value pairs"""
+        try:
+            # Load emails
+            emails_df = pd.read_csv(csv_path)
+            
+            # Add email_id if not present
+            if 'email_id' not in emails_df.columns:
+                emails_df['email_id'] = range(1, len(emails_df) + 1)
+            
+            extracted_data = []
+            
+            print(f"Processing {len(emails_df)} emails...")
+            
+            for idx, row in emails_df.iterrows():
+                print(f"Processing email {idx + 1}/{len(emails_df)}")
+                
+                # Extract key-value pairs
+                key_values = self.extract_key_values_from_email(row)
+                extracted_data.append(key_values)
+                
+                # Print status
+                importance = "IMPORTANT" if key_values.get('is_important', False) else "NOT IMPORTANT"
+                incident_type = key_values.get('incident_type', 'Unknown')
+                print(f"  - {importance}: {incident_type}")
+            
+            # Save extracted data
+            with open(output_path, 'w') as f:
+                json.dump(extracted_data, f, indent=2)
+            
+            print(f"\nKey-value pairs saved to {output_path}")
+            
+            # Print summary
+            important_count = sum(1 for item in extracted_data if item.get('is_important', False))
+            print(f"Summary: {important_count}/{len(extracted_data)} emails marked as important")
+            
+            return True
+            
+        except Exception as e:
+            print(f"Error processing emails: {e}")
+            return False
+
+if __name__ == "__main__":
+    flagger = SmartFlagger()
+    flagger.process_emails('data/emails.csv', 'data/extracted_keyvalues.json')
+
+
+
+import json
+import os
+import requests
+import urllib3
+import warnings
+from datetime import datetime
+from dotenv import load_dotenv
+from reportlab.lib.pagesizes import letter
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.units import inch
+from docx import Document
+from docx.shared import Inches
+import re
+
+# Disable SSL warnings
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+warnings.filterwarnings('ignore', message='Unverified HTTPS request')
+
+load_dotenv()
+
+class LlamaDocGenerator:
+    def __init__(self):
+        self.api_key = os.getenv('LLAMA_API_KEY')
+        self.model_name = os.getenv('LLAMA_MODEL', 'llama-4-scout-instruct')
+        self.temperature = float(os.getenv('TEMPERATURE', '0.3'))
+        self.api_url = os.getenv('API_ENDPOINT', 'https://api.copdev.azpriv-cloud.ubs.net/api/chat/completions')
+        
+        if not self.api_key:
+            raise ValueError("LLAMA_API_KEY not found in .env file")
+        
+        print(f"Initialized LlamaDocGenerator with model: {self.model_name}")
+        print(f"API Endpoint: {self.api_url}")
+    
+    def _call_openwebui_api(self, prompt):
+        """Call OpenWebUI API using chat completions format"""
+        headers = {
+            'Authorization': f'Bearer {self.api_key}',
+            'Content-Type': 'application/json'
+        }
+        
+        # OpenWebUI uses OpenAI-compatible format with messages array
+        data = {
+            'model': self.model_name,
+            'messages': [
+                {
+                    'role': 'user',
+                    'content': prompt
+                }
+            ],
+            'temperature': self.temperature,
+            'max_tokens': 2000,
+            'stream': False
+        }
+        
+        try:
+            # Disable SSL verification
+            response = requests.post(
+                self.api_url, 
+                headers=headers, 
+                json=data,
+                verify=False,  # Disable SSL verification
+                timeout=120
+            )
+            
+            response.raise_for_status()
+            result = response.json()
+            
+            # Extract content from OpenAI-compatible response
+            if 'choices' in result and len(result['choices']) > 0:
+                return result['choices'][0]['message']['content']
+            else:
+                print(f"Unexpected response format: {result}")
+                return None
+                
+        except requests.exceptions.SSLError as e:
+            print(f"SSL Error (this should not happen with verify=False): {e}")
+            return None
+        except requests.exceptions.RequestException as e:
+            print(f"Request error: {e}")
+            return None
+        except Exception as e:
+            print(f"OpenWebUI API error: {e}")
+            return None
+    
+    def save_as_pdf(self, content, output_path):
+        """Save content as PDF"""
+        try:
+            doc = SimpleDocTemplate(output_path, pagesize=letter,
+                                  rightMargin=72, leftMargin=72,
+                                  topMargin=72, bottomMargin=18)
+            
+            styles = getSampleStyleSheet()
+            story = []
+            
+            # Add title style
+            title_style = ParagraphStyle(
+                'CustomTitle',
+                parent=styles['Heading1'],
+                fontSize=16,
+                spaceAfter=30,
+                alignment=1  # Center alignment
+            )
+            
+            # Process content
+            lines = content.split('\n')
+            for line in lines:
+                line = line.strip()
+                if not line:
+                    story.append(Spacer(1, 12))
+                    continue
+                
+                # Check if it's a heading
+                if line.startswith('# '):
+                    story.append(Paragraph(line[2:], title_style))
+                elif line.startswith('## '):
+                    story.append(Paragraph(line[3:], styles['Heading2']))
+                elif line.startswith('### '):
+                    story.append(Paragraph(line[4:], styles['Heading3']))
+                elif line.startswith('#### '):
+                    story.append(Paragraph(line[5:], styles['Heading4']))
+                else:
+                    story.append(Paragraph(line, styles['Normal']))
+                
+                story.append(Spacer(1, 6))
+            
+            doc.build(story)
+            return True
+            
+        except Exception as e:
+            print(f"Error saving PDF: {e}")
+            return False
+    
+    def save_as_doc(self, content, output_path):
+        """Save content as DOC"""
+        try:
+            doc = Document()
+            
+            # Add title
+            title = doc.add_heading('IT Incident Report', 0)
+            title.alignment = 1  # Center alignment
+            
+            # Process content
+            lines = content.split('\n')
+            for line in lines:
+                line = line.strip()
+                if not line:
+                    continue
+                
+                # Check if it's a heading
+                if line.startswith('# '):
+                    doc.add_heading(line[2:], level=1)
+                elif line.startswith('## '):
+                    doc.add_heading(line[3:], level=2)
+                elif line.startswith('### '):
+                    doc.add_heading(line[4:], level=3)
+                elif line.startswith('#### '):
+                    doc.add_heading(line[5:], level=4)
+                else:
+                    doc.add_paragraph(line)
+            
+            doc.save(output_path)
+            return True
+            
+        except Exception as e:
+            print(f"Error saving DOC: {e}")
+            return False
+    
+    def generate_consolidated_document(self, keyvalues_path, output_dir):
+        """Generate single consolidated document"""
+        try:
+            # Load key-value pairs
+            with open(keyvalues_path, 'r') as f:
+                key_values = json.load(f)
+            
+            # Filter important incidents only
+            important_incidents = [kv for kv in key_values if kv.get('is_important', False)]
+            
+            if not important_incidents:
+                print("No important incidents found")
+                return False
+            
+            print(f"Generating consolidated document for {len(important_incidents)} important incidents...")
+            
+            # Create consolidated prompt
+            prompt = self._create_consolidated_prompt(important_incidents)
+            
+            # Generate document
+            document_content = self._call_openwebui_api(prompt)
+            
+            if document_content:
+                # Save in multiple formats
+                base_name = 'consolidated_incident_report'
+                
+                # Save as TXT
+                txt_path = os.path.join(output_dir, f'{base_name}.txt')
+                with open(txt_path, 'w', encoding='utf-8') as f:
+                    f.write(document_content)
+                
+                # Save as PDF
+                pdf_path = os.path.join(output_dir, f'{base_name}.pdf')
+                pdf_success = self.save_as_pdf(document_content, pdf_path)
+                
+                # Save as DOC
+                doc_path = os.path.join(output_dir, f'{base_name}.doc')
+                doc_success = self.save_as_doc(document_content, doc_path)
+                
+                print(f"Documents saved:")
+                print(f"  ✅ TXT: {txt_path}")
+                if pdf_success:
+                    print(f"  ✅ PDF: {pdf_path}")
+                else:
+                    print(f"  ❌ PDF: Failed to generate")
+                if doc_success:
+                    print(f"  ✅ DOC: {doc_path}")
+                else:
+                    print(f"  ❌ DOC: Failed to generate")
+                
+                return True
+            else:
+                print("Failed to generate document content")
+                return False
+                
+        except Exception as e:
+            print(f"Error generating consolidated document: {e}")
+            return False
+    
+    def generate_individual_documents(self, keyvalues_path, output_dir):
+        """Generate individual documents for each incident"""
+        try:
+            # Load key-value pairs
+            with open(keyvalues_path, 'r') as f:
+                key_values = json.load(f)
+            
+            # Filter important incidents only
+            important_incidents = [kv for kv in key_values if kv.get('is_important', False)]
+            
+            if not important_incidents:
+                print("No important incidents found")
+                return False
+            
+            print(f"Generating individual documents for {len(important_incidents)} incidents...")
+            
+            generated_files = []
+            
+            for idx, incident in enumerate(important_incidents):
+                print(f"Generating document {idx + 1}/{len(important_incidents)}")
+                
+                # Create individual prompt
+                prompt = self._create_individual_prompt(incident)
+                
+                # Generate document
+                document_content = self._call_openwebui_api(prompt)
+                
+                if document_content:
+                    # Create filename
+                    ticket_id = incident.get('ticket_id', f'incident_{idx+1}')
+                    safe_ticket_id = re.sub(r'[^\w\-_]', '_', ticket_id)
+                    
+                    # Save in multiple formats
+                    txt_path = os.path.join(output_dir, f'{safe_ticket_id}_report.txt')
+                    pdf_path = os.path.join(output_dir, f'{safe_ticket_id}_report.pdf')
+                    doc_path = os.path.join(output_dir, f'{safe_ticket_id}_report.doc')
+                    
+                    # Save as TXT
+                    with open(txt_path, 'w', encoding='utf-8') as f:
+                        f.write(document_content)
+                    
+                    # Save as PDF
+                    pdf_success = self.save_as_pdf(document_content, pdf_path)
+                    
+                    # Save as DOC
+                    doc_success = self.save_as_doc(document_content, doc_path)
+                    
+                    generated_files.extend([txt_path])
+                    if pdf_success:
+                        generated_files.append(pdf_path)
+                    if doc_success:
+                        generated_files.append(doc_path)
+                    
+                    print(f"  - Generated: {safe_ticket_id}_report (TXT/PDF/DOC)")
+                else:
+                    print(f"  - Failed to generate document for incident {idx + 1}")
+            
+            print(f"Generated {len(generated_files)} document files")
+            return True
+            
+        except Exception as e:
+            print(f"Error generating individual documents: {e}")
+            return False
+    
+    def _create_consolidated_prompt(self, incidents):
+        """Create prompt for consolidated document"""
+        incidents_summary = ""
+        for i, incident in enumerate(incidents, 1):
+            incidents_summary += f"""
+            Incident {i}:
+            - Email ID: {incident.get('email_id', 'N/A')}
+            - Ticket ID: {incident.get('ticket_id', 'N/A')}
+            - Type: {incident.get('incident_type', 'N/A')}
+            - Severity: {incident.get('severity', 'N/A')}
+            - Affected Systems: {', '.join(incident.get('affected_systems', []))}
+            - Status: {incident.get('status', 'N/A')}
+            - Impact Level: {incident.get('impact_level', 'N/A')}
+            - Assigned Team: {incident.get('assigned_team', 'N/A')}
+            - Description: {incident.get('description', 'N/A')}
+            - Original Subject: {incident.get('original_subject', 'N/A')}
+            - Sender: {incident.get('original_sender', 'N/A')}
+            - Urgency Indicators: {', '.join(incident.get('urgency_indicators', []))}
+            """
+        
+        prompt = f"""
+        Generate a comprehensive IT incident report with the following structure:
+        
+        # IT Incident Report - {datetime.now().strftime('%Y-%m-%d')}
+        
+        ## Executive Summary
+        Provide an overview of all {len(incidents)} incidents processed, key statistics, severity distribution, and overall impact assessment on business operations.
+        
+        ## Incident Details
+        
+        {incidents_summary}
+        
+        For each incident above, create a detailed section with:
+        
+        ### Incident [Number]: [Ticket ID or Type]
+        
+        #### 1. Introduction/Summary
+        Brief overview of the incident including what happened, when it occurred, and initial impact assessment.
+        
+        #### 2. Root Cause and Impacted Systems
+        Detailed analysis of the root cause and comprehensive list of affected systems, services, and business processes.
+        
+        #### 3. Timeline of Events and Resolution
+        Chronological timeline of the incident from initial detection through resolution or current status.
+        
+        #### 4. Monitoring and Escalation
+        How the incident was detected, monitored, escalated through the organization, and communication protocols followed.
+        
+        #### 5. Final Status/Summary
+        Current status, resolution details, lessons learned, and any follow-up actions required.
+        
+        ## Overall Analysis
+        Provide comprehensive analysis of common patterns, trends, root causes, and system vulnerabilities identified across all incidents.
+        
+        ## Recommendations
+        List specific, actionable recommendations for:
+        - Preventing similar incidents
+        - Improving incident response procedures
+        - Enhancing monitoring and alerting
+        - Strengthening system resilience
+        
+        ## Appendix
+        - Contact information for responsible teams
+        - Reference documentation
+        - Related incident tickets
+        
+        Make it professional, detailed, and suitable for executive and technical team review.
+        """
+        
+        return prompt
+    
+    def _create_individual_prompt(self, incident):
+        """Create prompt for individual incident document"""
+        prompt = f"""
+        Generate a detailed incident report for the following incident:
+        
+        Incident Details:
+        - Email ID: {incident.get('email_id', 'N/A')}
+        - Ticket ID: {incident.get('ticket_id', 'N/A')}
+        - Type: {incident.get('incident_type', 'N/A')}
+        - Severity: {incident.get('severity', 'N/A')}
+        - Affected Systems: {', '.join(incident.get('affected_systems', []))}
+        - Status: {incident.get('status', 'N/A')}
+        - Impact Level: {incident.get('impact_level', 'N/A')}
+        - Assigned Team: {incident.get('assigned_team', 'N/A')}
+        - Description: {incident.get('description', 'N/A')}
+        - Original Subject: {incident.get('original_subject', 'N/A')}
+        - Sender: {incident.get('original_sender', 'N/A')}
+        - Received: {incident.get('original_received', 'N/A')}
+        - Urgency Indicators: {', '.join(incident.get('urgency_indicators', []))}
+        
+        Create a structured report with these sections:
+        
+        # Incident Report: {incident.get('ticket_id', 'Unknown Incident')}
+        
+        ## 1. Introduction/Summary
+        Provide a clear, concise summary of what happened, when it occurred, initial symptoms, and immediate impact on business operations.
+        
+        ## 2. Root Cause and Impacted Systems
+        Conduct thorough analysis of the root cause, contributing factors, and provide detailed information about all affected systems, services, and business processes.
+        
+        ## 3. Timeline of Events and Resolution
+        Create a comprehensive chronological timeline from incident detection through resolution, including:
+        - Detection time and method
+        - Initial response actions
+        - Escalation points
+        - Resolution steps
+        - Verification procedures
+        
+        ## 4. Monitoring and Escalation
+        Describe in detail:
+        - How the incident was detected and by whom
+        - Monitoring systems involved
+        - Escalation procedures followed
+        - Communication protocols used
+        - Stakeholder notifications
+        
+        ## 5. Final Status/Summary
+        Provide comprehensive information about:
+        - Current incident status
+        - Resolution details and verification
+        - Lessons learned
+        - Follow-up actions required
+        - Preventive measures implemented
+        
+        ## 6. Technical Details
+        Include relevant technical information such as:
+        - System configurations involved
+        - Error messages and logs
+        - Performance metrics
+        - Recovery procedures used
+        
+        ## 7. Recommendations
+        Provide specific recommendations for:
+        - Preventing similar incidents
+        - Improving response procedures
+        - Enhancing monitoring
+        - System improvements
+        
+        Make it detailed, professional, and actionable for technical teams and management.
+        """
+        
+        return prompt
+    
+    def generate_documents(self, keyvalues_path, output_dir, mode='consolidated'):
+        """Main function to generate documents"""
+        # Create output directory if it doesn't exist
+        os.makedirs(output_dir, exist_ok=True)
+        
+        if mode == 'consolidated':
+            return self.generate_consolidated_document(keyvalues_path, output_dir)
+        elif mode == 'individual':
+            return self.generate_individual_documents(keyvalues_path, output_dir)
+        else:
+            print("Invalid mode. Use 'consolidated' or 'individual'")
+            return False
+
+if __name__ == "__main__":
+    generator = LlamaDocGenerator()
+    
+    # Generate consolidated document
+    generator.generate_documents('data/extracted_keyvalues.json', 'data/generated_docs/', 'consolidated')
+
+
+import os
+import sys
+import json
+import urllib3
+import warnings
+from src.smart_flagger import SmartFlagger
+from src.llama_doc_generator import LlamaDocGenerator
+from src.evaluator import EmailClassificationEvaluator
+
+# Disable SSL warnings globally
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+warnings.filterwarnings('ignore', message='Unverified HTTPS request')
+
+def check_requirements():
+    """Check if required files exist"""
+    required_files = ['.env', 'data/emails.csv']
+    missing_files = []
+    
+    for file in required_files:
+        if not os.path.exists(file):
+            missing_files.append(file)
+    
+    if missing_files:
+        print("❌ Missing required files:")
+        for file in missing_files:
+            print(f"   - {file}")
+        print("\nPlease ensure you have:")
+        print("1. .env file with LLAMA_API_KEY and OpenWebUI endpoint")
+        print("2. data/emails.csv with columns: folder, subject, sender, received, body")
+        return False
+    
+    return True
+
+def display_banner():
+    """Display application banner"""
+    print("="*80)
+    print("                    EMAIL-LLM-DOCS PIPELINE")
+    print("           Automated Email Analysis and Documentation Generation")
+    print("                    Using OpenWebUI with SSL Disabled")
+    print("="*80)
+
+def main():
+    display_banner()
+    
+    # Check requirements
+    if not check_requirements():
+        sys.exit(1)
+    
+    # Create data directories if they don't exist
+    os.makedirs('data', exist_ok=True)
+    os.makedirs('data/generated_docs', exist_ok=True)
+    
+    try:
+        # Step 1: Smart Flagging (Key-Value Extraction)
+        print("\n🔍 STEP 1: Smart Flagging (Key-Value Extraction)")
+        print("-" * 60)
+        print("Processing emails and extracting key information using OpenWebUI...")
+        
+        flagger = SmartFlagger()
+        
+        if flagger.process_emails('data/emails.csv', 'data/extracted_keyvalues.json'):
+            print("✅ Smart flagging completed successfully")
+        else:
+            print("❌ Smart flagging failed")
+            sys.exit(1)
+        
+        # Step 2: Document Generation
+        print("\n📄 STEP 2: Document Generation")
+        print("-" * 60)
+        print("Generating documentation from extracted key-value pairs...")
+        
+        doc_generator = LlamaDocGenerator()
+        
+        # Choose generation mode
+        print("\nChoose document generation mode:")
+        print("1. Consolidated (single document with all incidents)")
+        print("2. Individual (separate document for each incident)")
+        print("3. Both (generate both consolidated and individual)")
+        
+        while True:
+            choice = input("Enter choice (1, 2, or 3): ").strip()
+            if choice == '1':
+                generation_modes = ['consolidated']
+                break
+            elif choice == '2':
+                generation_modes = ['individual']
+                break
+            elif choice == '3':
+                generation_modes = ['consolidated', 'individual']
+                break
+            else:
+                print("Invalid choice. Please enter 1, 2, or 3.")
+        
+        # Generate documents
+        success = True
+        for mode in generation_modes:
+            print(f"\nGenerating {mode} documents...")
+            if doc_generator.generate_documents('data/extracted_keyvalues.json', 'data/generated_docs/', mode):
+                print(f"✅ {mode.title()} document generation completed successfully")
+            else:
+                print(f"❌ {mode.title()} document generation failed")
+                success = False
+        
+        if not success:
+            print("⚠️  Some document generation failed, but continuing...")
+        
+        # Step 3: Evaluation (if manual labels exist)
+        print("\n📊 STEP 3: Evaluation")
+        print("-" * 60)
+        
+        if os.path.exists('data/manual_labels.csv'):
+            print("Manual labels found. Starting evaluation...")
+            evaluator = EmailClassificationEvaluator('data/manual_labels.csv')
+            
+            if evaluator.evaluate('data/extracted_keyvalues.json', 'data/'):
+                print("✅ Evaluation completed successfully")
+            else:
+                print("❌ Evaluation failed")
+        else:
+            print("⚠️  Manual labels not found. Skipping evaluation.")
+            print("   To enable evaluation:")
+            print("   1. Create data/manual_labels.csv with columns:")
+            print("      email_id, folder, subject, sender, received, body, human_label")
+            print("   2. Add human_label column with 1 for important emails, 0 for not important")
+        
+        # Show results and summary
+        print("\n📋 PIPELINE RESULTS")
+        print("=" * 60)
+        
+        # Show generated files
+        print("Generated Files:")
+        
+        files_to_check = [
+            ('data/extracted_keyvalues.json', 'Key-value pairs extracted from emails'),
+            ('data/generated_docs/consolidated_incident_report.txt', 'Consolidated incident report (TXT)'),
+            ('data/generated_docs/consolidated_incident_report.pdf', 'Consolidated incident report (PDF)'),
+            ('data/generated_docs/consolidated_incident_report.doc', 'Consolidated incident report (DOC)'),
+            ('data/evaluation_results.json', 'Evaluation metrics and results'),
+            ('data/confusion_matrix.png', 'Confusion matrix visualization'),
+            ('data/detailed_evaluation_report.txt', 'Detailed evaluation report')
+        ]
+        
+        for file_path, description in files_to_check:
+            if os.path.exists(file_path):
+                file_size = os.path.getsize(file_path)
+                print(f"✅ {file_path} ({file_size:,} bytes) - {description}")
+            else:
+                print(f"❌ {file_path} - {description}")
+        
+        print("\n" + "=" * 80)
+        print("                    PIPELINE COMPLETED SUCCESSFULLY!")
+        print("=" * 80)
+        
+        # Show summary statistics
+        if os.path.exists('data/extracted_keyvalues.json'):
+            with open('data/extracted_keyvalues.json', 'r') as f:
+                data = json.load(f)
+                important_count = sum(1 for item in data if item.get('is_important', False))
+                print(f"\n📈 Summary Statistics:")
+                print(f"   Total emails processed: {len(data)}")
+                print(f"   Important emails identified: {important_count}")
+                print(f"   Classification rate: {important_count/len(data)*100:.1f}%")
+        
+    except KeyboardInterrupt:
+        print("\n\n⚠️  Pipeline interrupted by user")
+        sys.exit(1)
+    except Exception as e:
+        print(f"\n❌ Pipeline failed with error: {e}")
+        sys.exit(1)
+
+if __name__ == "__main__":
+    main()
+
+import pandas as pd
+import numpy as np
+from sklearn.metrics import confusion_matrix, classification_report, accuracy_score
+from sklearn.metrics import precision_score, recall_score, f1_score
+import matplotlib.pyplot as plt
+import seaborn as sns
+import json
+import os
+from datetime import datetime
+import urllib3
+import warnings
+
+# Disable SSL warnings (to match other files)
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+warnings.filterwarnings('ignore', message='Unverified HTTPS request')
+
+class EmailClassificationEvaluator:
+    def __init__(self, manual_labels_path):
+        self.manual_labels_path = manual_labels_path
+        self.manual_data = None
+        self.predictions = None
+        self.evaluation_results = {}
+        
+    def load_manual_labels(self):
+        """Load human-labeled data from CSV"""
+        try:
+            self.manual_data = pd.read_csv(self.manual_labels_path)
+            
+            # Ensure required columns exist (changed from email_id to subject and label)
+            required_columns = ['subject', 'label']
+            missing_columns = [col for col in required_columns if col not in self.manual_data.columns]
+            
+            if missing_columns:
+                print(f"Missing required columns: {missing_columns}")
+                print(f"Available columns: {list(self.manual_data.columns)}")
+                return False
+            
+            # Clean subject column for better matching
+            self.manual_data['subject_clean'] = self.manual_data['subject'].str.strip().str.lower()
+            
+            print(f"Loaded {len(self.manual_data)} manual labels")
+            print(f"Label distribution: {self.manual_data['label'].value_counts().to_dict()}")
+            
+            # Show sample subjects for verification
+            print("Sample subjects from manual labels:")
+            for i, subject in enumerate(self.manual_data['subject'].head(3)):
+                print(f"  {i+1}. {subject}")
+            
+            return True
+            
+        except Exception as e:
+            print(f"Error loading manual labels: {e}")
+            return False
+    
+    def load_predictions(self, keyvalues_path):
+        """Load predictions from extracted key-values"""
+        try:
+            with open(keyvalues_path, 'r', encoding='utf-8') as f:
+                self.predictions = json.load(f)
+            
+            print(f"Loaded predictions for {len(self.predictions)} emails")
+            
+            # Show prediction distribution
+            important_count = sum(1 for pred in self.predictions if pred.get('is_important', False))
+            print(f"Prediction distribution: {important_count} important, {len(self.predictions) - important_count} not important")
+            
+            # Show sample subjects for verification
+            print("Sample subjects from predictions:")
+            for i, pred in enumerate(self.predictions[:3]):
+                subject = pred.get('original_subject', 'No subject')
+                print(f"  {i+1}. {subject}")
+            
+            return True
+            
+        except Exception as e:
+            print(f"Error loading predictions: {e}")
+            return False
+    
+    def prepare_evaluation_data(self):
+        """Prepare data for evaluation by matching subjects"""
+        if self.manual_data is None or self.predictions is None:
+            print("Manual labels or predictions not loaded")
+            return None, None, None
+        
+        # Convert predictions to DataFrame with subject-based matching
+        pred_data = []
+        for idx, item in enumerate(self.predictions):
+            original_subject = item.get('original_subject', '')
+            pred_data.append({
+                'subject': original_subject,
+                'subject_clean': str(original_subject).strip().lower(),
+                'predicted_label': 1 if item.get('is_important', False) else 0,
+                'incident_type': item.get('incident_type', 'Unknown'),
+                'severity': item.get('severity', 'Unknown'),
+                'confidence_indicators': len(item.get('urgency_indicators', [])),
+                'prediction_index': idx
+            })
+        
+        pred_df = pd.DataFrame(pred_data)
+        
+        # Merge manual labels with predictions based on subject
+        print("Attempting to match subjects...")
+        merged_data = self.manual_data.merge(
+            pred_df, 
+            on='subject_clean', 
+            how='inner',
+            suffixes=('_manual', '_pred')
+        )
+        
+        if len(merged_data) == 0:
+            print("No matching subjects found between manual labels and predictions")
+            print("\nTrying fuzzy matching...")
+            
+            # Try fuzzy matching if exact matching fails
+            merged_data = self._fuzzy_match_subjects()
+            
+            if len(merged_data) == 0:
+                print("Manual label subjects (first 10):")
+                for subject in self.manual_data['subject'].head(10):
+                    print(f"  - {subject}")
+                
+                print("\nPrediction subjects (first 10):")
+                for subject in pred_df['subject'].head(10):
+                    print(f"  - {subject}")
+                
+                return None, None, None
+        
+        # Rename label column to human_label for consistency
+        merged_data['human_label'] = merged_data['label']
+        
+        y_true = merged_data['human_label'].values
+        y_pred = merged_data['predicted_label'].values
+        
+        print(f"Successfully matched {len(merged_data)} emails by subject")
+        print(f"Prepared {len(y_true)} samples for evaluation")
+        
+        return y_true, y_pred, merged_data
+    
+    def _fuzzy_match_subjects(self):
+        """Attempt fuzzy matching of subjects"""
+        try:
+            from difflib import SequenceMatcher
+            
+            matched_data = []
+            
+            for _, manual_row in self.manual_data.iterrows():
+                manual_subject = manual_row['subject_clean']
+                best_match = None
+                best_ratio = 0.0
+                
+                for _, pred_row in pd.DataFrame([{
+                    'subject': item.get('original_subject', ''),
+                    'subject_clean': str(item.get('original_subject', '')).strip().lower(),
+                    'predicted_label': 1 if item.get('is_important', False) else 0,
+                    'incident_type': item.get('incident_type', 'Unknown'),
+                    'severity': item.get('severity', 'Unknown'),
+                    'confidence_indicators': len(item.get('urgency_indicators', [])),
+                    'prediction_index': idx
+                } for idx, item in enumerate(self.predictions)]).iterrows():
+                    
+                    pred_subject = pred_row['subject_clean']
+                    ratio = SequenceMatcher(None, manual_subject, pred_subject).ratio()
+                    
+                    if ratio > best_ratio and ratio > 0.8:  # 80% similarity threshold
+                        best_ratio = ratio
+                        best_match = pred_row
+                
+                if best_match is not None:
+                    combined_row = {**manual_row, **best_match, 'match_ratio': best_ratio}
+                    matched_data.append(combined_row)
+            
+            if matched_data:
+                print(f"Fuzzy matching found {len(matched_data)} matches")
+                return pd.DataFrame(matched_data)
+            else:
+                return pd.DataFrame()
+                
+        except ImportError:
+            print("difflib not available for fuzzy matching")
+            return pd.DataFrame()
+        except Exception as e:
+            print(f"Error in fuzzy matching: {e}")
+            return pd.DataFrame()
+    
+    def calculate_metrics(self, y_true, y_pred):
+        """Calculate classification metrics"""
+        return {
+            'accuracy': accuracy_score(y_true, y_pred),
+            'precision': precision_score(y_true, y_pred, zero_division=0),
+            'recall': recall_score(y_true, y_pred, zero_division=0),
+            'f1_score': f1_score(y_true, y_pred, zero_division=0)
+        }
+    
+    def plot_confusion_matrix(self, y_true, y_pred, save_path=None):
+        """Generate confusion matrix plot"""
+        cm = confusion_matrix(y_true, y_pred)
+        
+        plt.figure(figsize=(10, 8))
+        sns.heatmap(
+            cm, 
+            annot=True, 
+            fmt='d', 
+            cmap='Blues',
+            xticklabels=['Not Important (0)', 'Important (1)'],
+            yticklabels=['Not Important (0)', 'Important (1)'],
+            cbar_kws={'label': 'Count'}
+        )
+        
+        plt.title('Email Classification Confusion Matrix\n(Smart Flagger Performance)', fontsize=14)
+        plt.xlabel('Predicted Label', fontsize=12)
+        plt.ylabel('True Label', fontsize=12)
+        
+        # Add accuracy to the plot
+        accuracy = accuracy_score(y_true, y_pred)
+        plt.figtext(0.02, 0.02, f'Accuracy: {accuracy:.3f}', fontsize=10)
+        
+        if save_path:
+            try:
+                plt.savefig(save_path, dpi=300, bbox_inches='tight')
+                print(f"Confusion matrix saved to {save_path}")
+            except Exception as e:
+                print(f"Warning: Could not save confusion matrix image: {e}")
+        
+        # Handle display gracefully
+        try:
+            plt.show()
+        except Exception as e:
+            print(f"Warning: Could not display plot (running in headless environment?): {e}")
+        
+        return cm
+    
+    def analyze_errors(self, merged_data):
+        """Analyze classification errors"""
+        errors = merged_data[merged_data['human_label'] != merged_data['predicted_label']]
+        
+        if len(errors) == 0:
+            print("No classification errors found!")
+            return
+        
+        print(f"\nError Analysis ({len(errors)} errors):")
+        print("="*50)
+        
+        # False Positives (predicted important, actually not important)
+        false_positives = errors[errors['predicted_label'] == 1]
+        if len(false_positives) > 0:
+            print(f"\nFalse Positives ({len(false_positives)}):")
+            for _, row in false_positives.head(5).iterrows():
+                subject = row.get('subject_manual', row.get('subject', 'No subject'))
+                print(f"  - Subject: {subject[:70]}...")
+        
+        # False Negatives (predicted not important, actually important)
+        false_negatives = errors[errors['predicted_label'] == 0]
+        if len(false_negatives) > 0:
+            print(f"\nFalse Negatives ({len(false_negatives)}):")
+            for _, row in false_negatives.head(5).iterrows():
+                subject = row.get('subject_manual', row.get('subject', 'No subject'))
+                print(f"  - Subject: {subject[:70]}...")
+    
+    def generate_detailed_report(self, merged_data, output_dir):
+        """Generate detailed evaluation report"""
+        try:
+            # Ensure output directory exists
+            os.makedirs(output_dir, exist_ok=True)
+            
+            report_path = os.path.join(output_dir, 'detailed_evaluation_report.txt')
+            
+            with open(report_path, 'w', encoding='utf-8') as f:
+                f.write("DETAILED EVALUATION REPORT\n")
+                f.write("="*50 + "\n\n")
+                
+                f.write("MATCHING METHOD: Subject-based matching\n")
+                f.write("MANUAL LABELS COLUMN: 'label' (not 'human_label')\n")
+                f.write("MATCHING COLUMN: 'subject'\n\n")
+                
+                # Overall statistics
+                f.write("OVERALL STATISTICS\n")
+                f.write("-"*20 + "\n")
+                f.write(f"Total emails evaluated: {len(merged_data)}\n")
+                f.write(f"Correctly classified: {len(merged_data[merged_data['human_label'] == merged_data['predicted_label']])}\n")
+                f.write(f"Incorrectly classified: {len(merged_data[merged_data['human_label'] != merged_data['predicted_label']])}\n\n")
+                
+                # Breakdown by incident type
+                f.write("BREAKDOWN BY INCIDENT TYPE\n")
+                f.write("-"*30 + "\n")
+                if 'incident_type' in merged_data.columns:
+                    incident_breakdown = merged_data.groupby('incident_type').agg({
+                        'human_label': 'count',
+                        'predicted_label': lambda x: (x == merged_data.loc[x.index, 'human_label']).sum()
+                    }).rename(columns={'human_label': 'total', 'predicted_label': 'correct'})
+                    
+                    for incident_type, row in incident_breakdown.iterrows():
+                        accuracy = row['correct'] / row['total'] if row['total'] > 0 else 0
+                        f.write(f"{incident_type}: {row['correct']}/{row['total']} ({accuracy:.2%})\n")
+                
+                f.write("\n")
+                
+                # Detailed error analysis
+                errors = merged_data[merged_data['human_label'] != merged_data['predicted_label']]
+                if len(errors) > 0:
+                    f.write("DETAILED ERROR ANALYSIS\n")
+                    f.write("-"*25 + "\n")
+                    
+                    for _, row in errors.iterrows():
+                        subject = row.get('subject_manual', row.get('subject', 'N/A'))
+                        f.write(f"Subject: {subject}\n")
+                        f.write(f"Actual Label: {row['human_label']}\n")
+                        f.write(f"Predicted Label: {row['predicted_label']}\n")
+                        f.write(f"Incident Type: {row.get('incident_type', 'N/A')}\n")
+                        f.write(f"Severity: {row.get('severity', 'N/A')}\n")
+                        if 'match_ratio' in row:
+                            f.write(f"Subject Match Ratio: {row['match_ratio']:.3f}\n")
+                        f.write("-"*40 + "\n")
+                
+                # Subject matching statistics
+                f.write("SUBJECT MATCHING STATISTICS\n")
+                f.write("-"*30 + "\n")
+                f.write(f"Total manual labels: {len(self.manual_data) if self.manual_data is not None else 'N/A'}\n")
+                f.write(f"Total predictions: {len(self.predictions) if self.predictions is not None else 'N/A'}\n")
+                f.write(f"Successfully matched: {len(merged_data)}\n")
+                if hasattr(self, 'manual_data') and self.manual_data is not None:
+                    match_rate = len(merged_data) / len(self.manual_data) * 100
+                    f.write(f"Match rate: {match_rate:.1f}%\n")
+            
+            print(f"Detailed report saved to {report_path}")
+            
+        except Exception as e:
+            print(f"Error generating detailed report: {e}")
+    
+    def evaluate(self, keyvalues_path, output_dir='data/'):
+        """Main evaluation function"""
+        print("Starting evaluation with subject-based matching...")
+        print("="*50)
+        
+        # Load data
+        if not self.load_manual_labels():
+            return False
+        
+        if not self.load_predictions(keyvalues_path):
+            return False
+        
+        # Prepare evaluation data
+        result = self.prepare_evaluation_data()
+        if result is None or result[0] is None:
+            return False
+        
+        y_true, y_pred, merged_data = result
+        
+        # Calculate metrics
+        metrics = self.calculate_metrics(y_true, y_pred)
+        classification_report_dict = classification_report(
+            y_true, y_pred, 
+            target_names=['Not Important', 'Important'],
+            output_dict=True
+        )
+        
+        # Generate confusion matrix
+        cm_path = os.path.join(output_dir, 'confusion_matrix.png')
+        confusion_mat = self.plot_confusion_matrix(y_true, y_pred, cm_path)
+        
+        # Analyze errors
+        self.analyze_errors(merged_data)
+        
+        # Generate detailed report
+        self.generate_detailed_report(merged_data, output_dir)
+        
+        # Compile results
+        self.evaluation_results = {
+            'timestamp': datetime.now().isoformat(),
+            'matching_method': 'subject_based',
+            'total_samples': len(y_true),
+            'metrics': metrics,
+            'classification_report': classification_report_dict,
+            'confusion_matrix': confusion_mat.tolist(),
+            'label_distribution': {
+                'true_labels': {
+                    'not_important': int(np.sum(y_true == 0)),
+                    'important': int(np.sum(y_true == 1))
+                },
+                'predicted_labels': {
+                    'not_important': int(np.sum(y_pred == 0)),
+                    'important': int(np.sum(y_pred == 1))
+                }
+            }
+        }
+        
+        # Save results
+        results_path = os.path.join(output_dir, 'evaluation_results.json')
+        with open(results_path, 'w', encoding='utf-8') as f:
+            json.dump(self.evaluation_results, f, indent=2)
+        
+        # Print summary
+        self.print_evaluation_summary()
+        return True
+    
+    def print_evaluation_summary(self):
+        """Print evaluation summary"""
+        print("\n" + "="*60)
+        print("EVALUATION SUMMARY (Subject-Based Matching)")
+        print("="*60)
+        
+        metrics = self.evaluation_results['metrics']
+        print(f"Matching Method: Subject-based")
+        print(f"Total Samples: {self.evaluation_results['total_samples']}")
+        print(f"Accuracy: {metrics['accuracy']:.3f} ({metrics['accuracy']*100:.1f}%)")
+        print(f"Precision: {metrics['precision']:.3f}")
+        print(f"Recall: {metrics['recall']:.3f}")
+        print(f"F1-Score: {metrics['f1_score']:.3f}")
+        
+        print("\nConfusion Matrix:")
+        cm = np.array(self.evaluation_results['confusion_matrix'])
+        print(f"True Negatives (Correctly identified as Not Important): {cm[0,0]}")
+        print(f"False Positives (Incorrectly identified as Important): {cm[0,1]}")
+        print(f"False Negatives (Missed Important emails): {cm[1,0]}")
+        print(f"True Positives (Correctly identified as Important): {cm[1,1]}")
+        
+        print("\nLabel Distribution:")
+        true_dist = self.evaluation_results['label_distribution']['true_labels']
+        pred_dist = self.evaluation_results['label_distribution']['predicted_labels']
+        print(f"Actual - Not Important: {true_dist['not_important']}, Important: {true_dist['important']}")
+        print(f"Predicted - Not Important: {pred_dist['not_important']}, Important: {pred_dist['important']}")
+        
+        # Performance interpretation
+        print("\nPerformance Interpretation:")
+        accuracy = metrics['accuracy']
+        if accuracy >= 0.9:
+            print("🟢 Excellent performance")
+        elif accuracy >= 0.8:
+            print("🟡 Good performance")
+        elif accuracy >= 0.7:
+            print("🟠 Fair performance")
+        else:
+            print("🔴 Poor performance - consider model tuning")
+        
+        print(f"\nNote: Evaluation performed using subject-based matching")
+        print(f"Manual labels file should have columns: 'subject' and 'label'")
+
+if __name__ == "__main__":
+    evaluator = EmailClassificationEvaluator('data/manual_labels.csv')
+    evaluator.evaluate('data/extracted_keyvalues.json', 'data/')
+
