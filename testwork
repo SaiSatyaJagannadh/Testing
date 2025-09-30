@@ -1,4 +1,237 @@
-#requirements.txt
-python-dotenv==1.0.0
-requests==2.31.0
-urllib3==2.0.4
+log_analyzer_ai/
+├── README.md
+├── requirements.txt
+├── .env                        # API keys, endpoints, sensitive config
+├── .gitignore                  # Exclude data files, zips, outputs, secrets
+│
+├── src/
+│   ├── __init__.py
+│   ├── main.py                # Entry point: Tkinter GUI + workflow orchestration
+│   ├── ai_client.py           # OpenAI/Azure integration only
+│   ├── log_processor.py       # Excel/JSON reading, parsing, data preparation
+│   └── config.py              # Prompt templates, model settings, constants
+│
+└── data/
+    ├── input/                 # Excel, CSV, JSON log files (+ .zip files)
+    │   └── .gitkeep          # Keep folder in git (empty placeholder)
+    └── output/                # AI analysis results, processed logs, reports
+        └── .gitkeep          # Keep folder in git (empty placeholder)
+
+
+
+openai
+python-dotenv
+pandas
+openpyxl
+tkinter
+
+
+OPENAI_API_KEY=your_api_key
+OPENAI_API_BASE=https://YOUR_RESOURCE_NAME.openai.azure.com/
+OPENAI_API_TYPE=azure
+OPENAI_API_VERSION=2024-02-01
+DEPLOYMENT_NAME=test-model
+
+
+
+# src/config.py
+
+PROMPT_TEMPLATE = """
+As a production support specialist, your role involves troubleshooting AUTOSYS job failures running on UNIX servers.
+Analyze the error logs to predict the error and resolution steps.
+If error log is different from examples provided, respond that you don't know.
+Give error message and resolution as output.
+
+## Example 1:
+Error log:
+2024-05-08 01:00:04.996178570-INFO -Begin - SFTP_GET_FILE Environment : DR
+File : UBS ratings.xml
+2024-05-08 01:00:05.003570902-INFO - FILE NAME is : UBS ratings 20240507.xml
+2024-05-08 01:00:08.859687433-ERROR -UBS ratings Not found remotely
+2024-05-08 01:00:08.862072121-ERROR -Exiting with custom return code 126
+Error Message: ERROR -UBS ratings Not found remotely
+Resolution: Check with Upstream for file as file not found
+
+## Example 2:
+Error log:
+Couldn't write to remote file "/DATA/Relationship/RELATIONSHIPSTREAM_20240507_0001.txt": Failure
+2024-05-08 04:21:23.668696801-ERROR -ERROR while SFTP(PUSH) of file /data/2/FISERV/OutputData/FISERV_CUSTOMER_ACCOUNT_RELATIONSHIP/RELATIONSHIPSTREAM_20240507_0001.txt to Remote Server - sftp_ib_amer_gtw.swissbank.com
+2024-05-08 04:21:23.671498732-ERROR -Exiting with custom return code 126
+Error Message: ERROR while SFTP(PUSH) of file /data/2/FISERV/OutputData/FISERV_CUSTOMER_ACCOUNT_RELATIONSHIP/RELATIONSHIPSTREAM_20240507_0001.txt to Remote Server - sftp_ib_amer_gtw.swissbank.com
+Resolution:
+Verify the SFTP connectivity.
+Verify the file is present for file transfer.
+Force start the job once if the file exists and connectivity is fine
+
+## Example 3:
+Error log:
+Error connecting: TTransportException, Could not connect to pedt14xv00app.she.pwj.com:21000
+Not connected to Impala, could not execute queries.
+"""
+
+MODEL_PARAMS = {
+    "temperature": 0.3,
+    "max_tokens": 1000
+}
+
+
+# src/ai_client.py
+import os
+from dotenv import load_dotenv
+import openai
+
+load_dotenv()
+
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+OPENAI_API_BASE = os.getenv("OPENAI_API_BASE")
+OPENAI_API_TYPE = os.getenv("OPENAI_API_TYPE", "azure")
+OPENAI_API_VERSION = os.getenv("OPENAI_API_VERSION")
+DEPLOYMENT_NAME = os.getenv("DEPLOYMENT_NAME")
+
+openai.api_type = OPENAI_API_TYPE
+openai.api_base = OPENAI_API_BASE
+openai.api_version = OPENAI_API_VERSION
+openai.api_key = OPENAI_API_KEY
+
+def get_ai_resolution(question, prompt_template, params):
+    full_prompt = prompt_template + "\n\nError log:\n" + question
+
+    response = openai.ChatCompletion.create(
+        deployment_id=DEPLOYMENT_NAME,
+        model="gpt-35-turbo",
+        messages=[{"role": "user", "content": full_prompt}],
+        temperature=params.get("temperature", 0.3),
+        max_tokens=params.get("max_tokens", 1000)
+    )
+    return response.choices[0].message["content"]
+
+
+# src/log_processor.py
+import pandas as pd
+import json
+import zipfile
+import os
+
+def read_excel_log(filepath):
+    df = pd.read_excel(filepath)
+    logs = []
+    if "error from logs" in df.columns:
+        logs = df["error from logs"].dropna().tolist()
+    return logs
+
+def read_json_log(filepath):
+    with open(filepath, 'r') as f:
+        data = json.load(f)
+    # Assume logs are in a top-level "logs" key otherwise process accordingly
+    if isinstance(data, dict) and "logs" in data:
+        return data["logs"]
+    elif isinstance(data, list):
+        return [str(item) for item in data]
+    else:
+        return [str(data)]
+
+def extract_zip_and_process(zip_path, filetype):
+    logs = []
+    with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+        for fileinfo in zip_ref.infolist():
+            filename = fileinfo.filename
+            if filetype == 'excel' and filename.endswith('.xlsx'):
+                zip_ref.extract(filename)
+                logs.extend(read_excel_log(filename))
+                os.remove(filename)
+            elif filetype == 'json' and filename.endswith('.json'):
+                zip_ref.extract(filename)
+                logs.extend(read_json_log(filename))
+                os.remove(filename)
+    return logs
+
+
+
+# src/main.py
+import tkinter as tk
+from tkinter import filedialog, messagebox, scrolledtext
+from src import log_processor, ai_client, config
+import os
+
+def process_file(filepath):
+    if filepath.endswith('.xlsx'):
+        logs = log_processor.read_excel_log(filepath)
+    elif filepath.endswith('.json'):
+        logs = log_processor.read_json_log(filepath)
+    elif filepath.endswith('.zip'):
+        filetype = "excel" if ".xlsx" in filepath else "json"
+        logs = log_processor.extract_zip_and_process(filepath, filetype)
+    else:
+        logs = []
+    return logs
+
+def run_ai_on_logs(logs):
+    results = []
+    for log in logs:
+        answer = ai_client.get_ai_resolution(
+            question=log,
+            prompt_template=config.PROMPT_TEMPLATE,
+            params=config.MODEL_PARAMS
+        )
+        results.append({"log": log, "solution": answer})
+    return results
+
+def save_results(results, output_path):
+    import pandas as pd
+    df = pd.DataFrame(results)
+    df.to_excel(output_path, index=False)
+
+class LogAnalyzerApp(tk.Tk):
+    def __init__(self):
+        super().__init__()
+        self.title("AI Log Analyzer")
+        self.geometry("900x600")
+
+        self.file_path = ""
+        self.results = []
+
+        self.file_label = tk.Label(self, text="Select log file (Excel, JSON, ZIP):")
+        self.file_label.pack()
+        self.file_button = tk.Button(self, text="Browse", command=self.browse_file)
+        self.file_button.pack()
+
+        self.process_button = tk.Button(self, text="Process and Analyze", command=self.process_and_analyze)
+        self.process_button.pack()
+
+        self.output_text = scrolledtext.ScrolledText(self, wrap=tk.WORD, width=110, height=25)
+        self.output_text.pack()
+
+        self.save_button = tk.Button(self, text="Save Results", command=self.save_output)
+        self.save_button.pack()
+
+    def browse_file(self):
+        self.file_path = filedialog.askopenfilename(filetypes=[
+            ("Log Files", "*.xlsx *.json *.zip"),
+            ("All Files", "*.*")
+        ])
+        messagebox.showinfo("File Selected", self.file_path)
+
+    def process_and_analyze(self):
+        if not self.file_path:
+            messagebox.showwarning("No file", "Please select a file first.")
+            return
+        logs = process_file(self.file_path)
+        if not logs:
+            self.output_text.insert(tk.END, "No logs found.\n")
+            return
+        self.results = run_ai_on_logs(logs)
+        self.output_text.delete(1.0, tk.END)
+        for entry in self.results:
+            self.output_text.insert(tk.END, f"Log:\n{entry['log']}\nSolution:\n{entry['solution']}\n\n---\n")
+
+    def save_output(self):
+        outpath = filedialog.asksaveasfilename(defaultextension=".xlsx", filetypes=[("Excel Files", "*.xlsx")])
+        if outpath and self.results:
+            save_results(self.results, outpath)
+            messagebox.showinfo("Saved", f"Results saved to {outpath}")
+
+if __name__ == "__main__":
+    app = LogAnalyzerApp()
+    app.mainloop()
+
+
