@@ -1,92 +1,33 @@
-def _read_excel(self, file_path):
-    """UNIVERSAL Excel reader - reads ANY Excel file structure"""
-    try:
-        if file_path.suffix.lower() == '.csv':
-            df = pd.read_csv(file_path)
-        else:
-            df = pd.read_excel(file_path)
-        
-        print(f"📊 Excel: {len(df)} rows, {len(df.columns)} columns: {list(df.columns)}")
-        
-        data = []
-        
-        # STRATEGY 1: Smart column detection
-        error_cols = [col for col in df.columns if any(word in str(col).lower() 
-                     for word in ['error', 'fail', 'exception', 'issue', 'problem', 'bug'])]
-        solution_cols = [col for col in df.columns if any(word in str(col).lower() 
-                        for word in ['solution', 'fix', 'resolve', 'answer', 'remedy', 'action'])]
-        job_cols = [col for col in df.columns if any(word in str(col).lower() 
-                   for word in ['job', 'name', 'title', 'process', 'task', 'id'])]
-        
-        print(f"🎯 Smart detection - Error: {error_cols}, Solution: {solution_cols}, Job: {job_cols}")
-        
-        # STRATEGY 2: If no smart detection, use ALL columns
-        if not error_cols or not solution_cols:
-            print("🔄 No specific columns found. Checking ALL content...")
-            
-            for _, row in df.iterrows():
-                # Look at ALL cells in this row
-                row_values = [str(val) for val in row.values if str(val) != 'nan']
-                
-                error_text = ""
-                solution_text = ""
-                job_text = str(row.iloc[0]) if len(row) > 0 else ""
-                
-                # Find error-like content in ANY cell
-                for val in row_values:
-                    if any(word in val.lower() for word in ['error', 'failed', 'exception', 'timeout', 'crash']):
-                        error_text = val
-                        break
-                
-                # Find solution-like content in ANY cell  
-                for val in row_values:
-                    if (any(word in val.lower() for word in ['check', 'restart', 'configure', 'try', 'ensure']) or
-                        len(val) > 20):  # Assume longer text might be solutions
-                        solution_text = val
-                        break
-                
-                # If still no solution, use any remaining long text
-                if not solution_text:
-                    for val in row_values:
-                        if val != error_text and len(val) > 15:
-                            solution_text = val
-                            break
-                
-                if error_text and solution_text:
-                    data.append({
-                        'jobname': job_text,
-                        'error': error_text,
-                        'solution': solution_text,
-                        'source': file_path.name
-                    })
-        
-        # STRATEGY 3: Use detected columns
-        else:
-            for _, row in df.iterrows():
-                error = str(row[error_cols[0]]) if error_cols else ""
-                solution = str(row[solution_cols[0]]) if solution_cols else ""
-                job = str(row[job_cols[0]]) if job_cols else ""
-                
-                if error != 'nan' and solution != 'nan' and len(error) > 3 and len(solution) > 3:
-                    data.append({
-                        'jobname': job,
-                        'error': error,
-                        'solution': solution,
-                        'source': file_path.name
-                    })
-        
-        print(f"✅ Final result: {len(data)} entries extracted")
-        
-        # Show sample
-        if data:
-            print("📋 Sample:")
-            sample = data[0]
-            print(f"   Job: {sample['jobname'][:30]}")
-            print(f"   Error: {sample['error'][:50]}")
-            print(f"   Solution: {sample['solution'][:50]}")
-        
-        return data
-        
-    except Exception as e:
-        print(f"❌ Excel read error: {str(e)}")
-        return []
+def _analyze_error_line_local(self, error_line, line_num, filename):
+    """Analyze error line using local knowledge base"""
+    import datetime  # Import here to fix the error
+    
+    error_keywords = self._extract_keywords(error_line)
+    best_match = self._find_best_solution_match(error_keywords, error_line)
+    
+    current_time = datetime.datetime.now().isoformat()
+    
+    if best_match:
+        return {
+            'filename': filename,
+            'line_number': line_num,
+            'error_line': error_line.strip(),
+            'error_keywords': error_keywords,
+            'matched_solution': best_match['solution'],
+            'original_error': best_match['original_error'],
+            'confidence': best_match['confidence'],
+            'jobname_reference': best_match.get('jobname', ''),
+            'analysis_method': 'local_knowledge_base',
+            'analysis_time': current_time
+        }
+    
+    return {
+        'filename': filename,
+        'line_number': line_num,
+        'error_line': error_line.strip(),
+        'error_keywords': error_keywords,
+        'matched_solution': 'No local solution found. Checking with AI...',
+        'confidence': 0.1,
+        'analysis_method': 'local_fallback',
+        'analysis_time': current_time
+    }
