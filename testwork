@@ -1,33 +1,215 @@
-def _analyze_error_line_local(self, error_line, line_num, filename):
-    """Analyze error line using local knowledge base"""
-    import datetime  # Import here to fix the error
-    
-    error_keywords = self._extract_keywords(error_line)
-    best_match = self._find_best_solution_match(error_keywords, error_line)
-    
-    current_time = datetime.datetime.now().isoformat()
-    
-    if best_match:
-        return {
-            'filename': filename,
-            'line_number': line_num,
-            'error_line': error_line.strip(),
-            'error_keywords': error_keywords,
-            'matched_solution': best_match['solution'],
-            'original_error': best_match['original_error'],
-            'confidence': best_match['confidence'],
-            'jobname_reference': best_match.get('jobname', ''),
-            'analysis_method': 'local_knowledge_base',
-            'analysis_time': current_time
+import re
+import json
+import requests
+import urllib3
+import logging
+import datetime  # Fix 1: Import datetime module
+from datetime import datetime as dt  # Fix 2: Import datetime class
+from config import OPENAI_API_KEY, OPENAI_BASE_URL, AI_MODEL, MAX_TOKENS, TEMPERATURE, ERROR_KEYWORDS
+
+# Disable SSL warnings
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+class AIAnalyzer:
+    def __init__(self, knowledge_base):
+        self.knowledge_base = knowledge_base
+        self.error_patterns = self._build_error_patterns()
+        self.api_headers = {
+            "Authorization": f"Bearer {OPENAI_API_KEY}",
+            "Content-Type": "application/json"
         }
+        
+        # Fix URL
+        base_url = OPENAI_BASE_URL.rstrip('/')
+        if base_url.endswith('/chat/completions'):
+            self.api_url = base_url
+        else:
+            self.api_url = f"{base_url}/chat/completions"
+        
+        # Setup session
+        self.session = requests.Session()
+        self.session.headers.update(self.api_headers)
+        self.session.verify = False
+        
+        # Pre-build everything for speed
+        self.knowledge_context = self._build_knowledge_context()
+        self.api_available = self._test_api_connection()
+        
+        logger.info(f"✓ AI Analyzer: {len(self.knowledge_base)} solutions loaded")
+        logger.info(f"✓ Built {len(self.error_patterns)} patterns for matching")
     
-    return {
-        'filename': filename,
-        'line_number': line_num,
-        'error_line': error_line.strip(),
-        'error_keywords': error_keywords,
-        'matched_solution': 'No local solution found. Checking with AI...',
-        'confidence': 0.1,
-        'analysis_method': 'local_fallback',
-        'analysis_time': current_time
-    }
+    def _test_api_connection(self):
+        """Quick API test"""
+        try:
+            test_payload = {
+                "model": AI_MODEL,
+                "messages": [{"role": "user", "content": "test"}],
+                "max_tokens": 5
+            }
+            
+            response = self.session.post(self.api_url, json=test_payload, timeout=5)
+            
+            if response.status_code == 200:
+                logger.info("✓ API available")
+                return True
+            else:
+                logger.info("⚠ API unavailable - using local knowledge only")
+                return False
+                
+        except Exception as e:
+            logger.info("⚠ API test failed - using local knowledge only")
+            return False
+    
+    def _build_error_patterns(self):
+        """Build patterns once at startup"""
+        patterns = {}
+        for entry in self.knowledge_base:
+            error_text = str(entry.get('error', '')).lower()
+            solution = entry.get('solution', '')
+            if error_text and solution:
+                key_words = self._extract_keywords(error_text)
+                pattern_key = ' '.join(sorted(key_words))
+                if pattern_key:
+                    patterns[pattern_key] = {
+                        'original_error': entry.get('error'),
+                        'solution': solution,
+                        'jobname': entry.get('jobname', ''),
+                        'keywords': key_words
+                    }
+        return patterns
+    
+    def _build_knowledge_context(self):
+        """Build AI context once at startup"""
+        context_examples = []
+        for i, entry in enumerate(self.knowledge_base[:5]):
+            context_examples.append(f"Error: {entry.get('error', '')}")
+            context_examples.append(f"Solution: {entry.get('solution', '')}")
+            context_examples.append("")
+        
+        return "\n".join(context_examples)
+    
+    def analyze_log_content(self, log_data):
+        """Analyze log content with datetime fix"""
+        results = []
+        
+        for log_entry in log_data:
+            lines = log_entry.get('lines', [])
+            filename = log_entry.get('filename', 'unknown')
+            
+            logger.info(f"📊 Analyzing {filename}")
+            
+            # Find errors
+            error_lines = self._find_errors_fast(lines)
+            logger.info(f"🔍 Found {len(error_lines)} errors")
+            
+            # Process errors
+            for line_num, error_line in error_lines[:10]:  # Limit to 10 errors
+                result = self._analyze_error_safe(error_line, line_num, filename)
+                results.append(result)
+        
+        return results
+    
+    def _find_errors_fast(self, lines):
+        """Find errors quickly"""
+        error_lines = []
+        
+        for i, line in enumerate(lines[:500]):  # Only check first 500 lines
+            line_lower = line.lower()
+            if any(keyword in line_lower for keyword in ERROR_KEYWORDS):
+                error_lines.append((i + 1, line))
+                
+                if len(error_lines) >= 20:  # Max 20 errors
+                    break
+        
+        return error_lines
+    
+    def _analyze_error_safe(self, error_line, line_num, filename):
+        """Safe error analysis with fixed datetime"""
+        try:
+            current_time = dt.now().isoformat()  # Use dt instead of datetime
+        except:
+            current_time = "2025-10-01T00:00:00"  # Fallback time
+        
+        error_keywords = self._extract_keywords(error_line)
+        best_match = self._find_best_solution_match(error_keywords, error_line)
+        
+        if best_match and best_match['confidence'] > 0.3:
+            return {
+                'filename': filename,
+                'line_number': line_num,
+                'error_line': error_line.strip()[:100],
+                'matched_solution': best_match['solution'],
+                'confidence': best_match['confidence'],
+                'jobname_reference': best_match.get('jobname', ''),
+                'analysis_method': 'local_knowledge',
+                'analysis_time': current_time
+            }
+        else:
+            return {
+                'filename': filename,
+                'line_number': line_num,
+                'error_line': error_line.strip()[:100],
+                'matched_solution': 'No strong local match found',
+                'confidence': 0.2,
+                'analysis_method': 'local_low',
+                'analysis_time': current_time
+            }
+    
+    def _extract_keywords(self, text):
+        """Fast keyword extraction"""
+        stop_words = {'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by'}
+        words = re.findall(r'\b\w+\b', text.lower())
+        keywords = [word for word in words if len(word) > 2 and word not in stop_words]
+        return keywords[:3]
+    
+    def _find_best_solution_match(self, error_keywords, full_error_line):
+        """Fast pattern matching"""
+        best_match = None
+        highest_score = 0
+        
+        for pattern_key, pattern_data in self.error_patterns.items():
+            pattern_keywords = set(pattern_data['keywords'])
+            error_keywords_set = set(error_keywords)
+            
+            overlap = len(pattern_keywords.intersection(error_keywords_set))
+            if overlap > 0:
+                total = len(pattern_keywords.union(error_keywords_set))
+                score = overlap / total if total > 0 else 0
+                
+                if score > highest_score and score > 0.2:
+                    highest_score = score
+                    best_match = {
+                        'solution': pattern_data['solution'],
+                        'original_error': pattern_data['original_error'],
+                        'jobname': pattern_data.get('jobname', ''),
+                        'confidence': round(score, 2)
+                    }
+        
+        return best_match
+    
+    def generate_summary_report(self, analysis_results):
+        """Generate summary report"""
+        if not analysis_results:
+            return "No errors found."
+        
+        total_errors = len(analysis_results)
+        high_confidence = len([r for r in analysis_results if r.get('confidence', 0) > 0.5])
+        
+        return f"""
+LOG ANALYSIS SUMMARY
+====================
+Total Errors: {total_errors}
+High Confidence Solutions: {high_confidence}
+Knowledge Base: {len(self.knowledge_base)} solutions
+Success Rate: {(high_confidence/total_errors)*100:.1f}%
+
+FILES ANALYZED:
+{', '.join(set([r['filename'] for r in analysis_results]))}
+"""
+
+# Test
+if __name__ == "__main__":
+    print("Testing AI Analyzer...")
