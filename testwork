@@ -1,1 +1,926 @@
 #Testing one 
+
+log_analyzer_ai/
+├── .env
+├── main.py
+├── file_reader.py
+├── ai_analyzer.py
+├── solution_finder.py
+├── config.py
+├── requirements.txt
+└── data/
+    ├── input/
+    ├── uploads/
+    └── output/
+
+
+# OpenAI API Configuration for Open WebUI
+OPENAI_API_KEY=your_openai_api_key_here
+OPENAI_BASE_URL=http://localhost:3000/v1
+# Alternative URLs:
+# OPENAI_BASE_URL=https://api.openai.com/v1  # For actual OpenAI
+# OPENAI_BASE_URL=http://localhost:8080/v1   # If Open WebUI runs on 8080
+
+# Application Settings
+MAX_FILE_SIZE=50
+DEBUG_MODE=True
+
+
+import os
+from pathlib import Path
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
+
+# Base directories
+BASE_DIR = Path(__file__).parent
+DATA_DIR = BASE_DIR / "data"
+INPUT_DIR = DATA_DIR / "input"
+UPLOADS_DIR = DATA_DIR / "uploads"
+OUTPUT_DIR = DATA_DIR / "output"
+
+# Create directories if they don't exist
+for directory in [DATA_DIR, INPUT_DIR, UPLOADS_DIR, OUTPUT_DIR]:
+    directory.mkdir(exist_ok=True)
+
+# OpenAI API Configuration (Works with Open WebUI)
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "http://localhost:3000/v1")
+
+if not OPENAI_API_KEY:
+    raise ValueError("OPENAI_API_KEY not found in .env file. Please add it.")
+
+# AI Model Settings
+AI_MODEL = "gpt-3.5-turbo"  # Or any model available in your Open WebUI
+MAX_TOKENS = 2000
+TEMPERATURE = 0.3
+
+# File configurations
+SUPPORTED_FORMATS = ['.txt', '.log', '.json', '.xlsx', '.csv', '.zip']
+MAX_FILE_SIZE = int(os.getenv("MAX_FILE_SIZE", "50")) * 1024 * 1024  # Convert to bytes
+
+# Error patterns to look for
+ERROR_KEYWORDS = [
+    'error', 'fail', 'exception', 'timeout', 'crash', 
+    'abort', 'denied', 'invalid', 'not found', 'refused'
+]
+
+print(f"✓ Configuration loaded - API URL: {OPENAI_BASE_URL}")
+
+
+
+import json
+import zipfile
+import pandas as pd
+from pathlib import Path
+import logging
+from config import INPUT_DIR, UPLOADS_DIR
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+class FileReader:
+    def __init__(self):
+        self.knowledge_data = []
+        self.load_knowledge_base()
+    
+    def load_knowledge_base(self):
+        """Load existing knowledge from input folder"""
+        try:
+            for file_path in INPUT_DIR.glob('*'):
+                if file_path.suffix.lower() in ['.xlsx', '.csv']:
+                    self.knowledge_data.extend(self._read_excel(file_path))
+                elif file_path.suffix.lower() == '.zip':
+                    self.knowledge_data.extend(self._read_zip(file_path))
+                elif file_path.suffix.lower() == '.json':
+                    self.knowledge_data.extend(self._read_json(file_path))
+            
+            logger.info(f"Loaded {len(self.knowledge_data)} knowledge entries")
+        except Exception as e:
+            logger.error(f"Error loading knowledge base: {str(e)}")
+    
+    def read_uploaded_file(self, file_path):
+        """Read newly uploaded file"""
+        file_path = Path(file_path)
+        
+        if file_path.suffix.lower() in ['.txt', '.log']:
+            return self._read_log_file(file_path)
+        elif file_path.suffix.lower() == '.json':
+            return self._read_json(file_path)
+        elif file_path.suffix.lower() in ['.xlsx', '.csv']:
+            return self._read_excel(file_path)
+        elif file_path.suffix.lower() == '.zip':
+            return self._read_zip(file_path)
+        else:
+            raise ValueError(f"Unsupported file format: {file_path.suffix}")
+    
+    def _read_log_file(self, file_path):
+        """Read text/log files"""
+        try:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+            
+            lines = content.split('\n')
+            log_data = {
+                'filename': file_path.name,
+                'content': content,
+                'lines': lines,
+                'total_lines': len(lines)
+            }
+            return [log_data]
+        except Exception as e:
+            logger.error(f"Error reading log file {file_path}: {str(e)}")
+            return []
+    
+    def _read_excel(self, file_path):
+        """Read Excel/CSV files"""
+        try:
+            if file_path.suffix.lower() == '.csv':
+                df = pd.read_csv(file_path)
+            else:
+                df = pd.read_excel(file_path)
+            
+            # Convert to standard format
+            data = []
+            for _, row in df.iterrows():
+                entry = {
+                    'jobname': row.get('jobname', ''),
+                    'error': row.get('errors', row.get('error', '')),
+                    'solution': row.get('solution', row.get('solutions', '')),
+                    'source': file_path.name
+                }
+                if entry['error'] and entry['solution']:
+                    data.append(entry)
+            
+            return data
+        except Exception as e:
+            logger.error(f"Error reading Excel file {file_path}: {str(e)}")
+            return []
+    
+    def _read_json(self, file_path):
+        """Read JSON files"""
+        try:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            
+            # Normalize JSON structure
+            if isinstance(data, list):
+                return data
+            elif isinstance(data, dict):
+                return [data]
+            return []
+        except Exception as e:
+            logger.error(f"Error reading JSON file {file_path}: {str(e)}")
+            return []
+    
+    def _read_zip(self, file_path):
+        """Read ZIP files and extract text files"""
+        try:
+            extracted_data = []
+            with zipfile.ZipFile(file_path, 'r') as zip_ref:
+                for file_info in zip_ref.filelist:
+                    if file_info.filename.endswith(('.txt', '.log')):
+                        content = zip_ref.read(file_info.filename).decode('utf-8')
+                        log_data = {
+                            'filename': file_info.filename,
+                            'content': content,
+                            'lines': content.split('\n'),
+                            'source_zip': file_path.name
+                        }
+                        extracted_data.append(log_data)
+            return extracted_data
+        except Exception as e:
+            logger.error(f"Error reading ZIP file {file_path}: {str(e)}")
+            return []
+    
+    def get_knowledge_base(self):
+        """Return loaded knowledge base"""
+        return self.knowledge_data
+
+# Test the reader
+if __name__ == "__main__":
+    reader = FileReader()
+    print(f"Knowledge base loaded: {len(reader.get_knowledge_base())} entries")
+
+
+
+import re
+import json
+import requests
+from datetime import datetime
+from config import OPENAI_API_KEY, OPENAI_BASE_URL, AI_MODEL, MAX_TOKENS, TEMPERATURE, ERROR_KEYWORDS
+import logging
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+class AIAnalyzer:
+    def __init__(self, knowledge_base):
+        self.knowledge_base = knowledge_base
+        self.error_patterns = self._build_error_patterns()
+        self.api_headers = {
+            "Authorization": f"Bearer {OPENAI_API_KEY}",
+            "Content-Type": "application/json"
+        }
+        self.api_url = f"{OPENAI_BASE_URL}/chat/completions"
+        
+        # Test API connection
+        self._test_api_connection()
+    
+    def _test_api_connection(self):
+        """Test connection to Open WebUI API"""
+        try:
+            test_payload = {
+                "model": AI_MODEL,
+                "messages": [{"role": "user", "content": "Hello"}],
+                "max_tokens": 10
+            }
+            
+            response = requests.post(self.api_url, headers=self.api_headers, 
+                                   json=test_payload, timeout=10)
+            
+            if response.status_code == 200:
+                logger.info("✓ Successfully connected to Open WebUI API")
+            else:
+                logger.warning(f"API connection test returned status: {response.status_code}")
+                
+        except Exception as e:
+            logger.error(f"API connection test failed: {str(e)}")
+            logger.info("Continuing with offline analysis only...")
+    
+    def _build_error_patterns(self):
+        """Build error patterns from knowledge base"""
+        patterns = {}
+        for entry in self.knowledge_base:
+            error_text = str(entry.get('error', '')).lower()
+            solution = entry.get('solution', '')
+            if error_text and solution:
+                key_words = self._extract_keywords(error_text)
+                pattern_key = ' '.join(sorted(key_words))
+                if pattern_key:
+                    patterns[pattern_key] = {
+                        'original_error': entry.get('error'),
+                        'solution': solution,
+                        'jobname': entry.get('jobname', ''),
+                        'keywords': key_words
+                    }
+        return patterns
+    
+    def _extract_keywords(self, text):
+        """Extract meaningful keywords from error text"""
+        stop_words = {'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by', 'is', 'was', 'are', 'were'}
+        words = re.findall(r'\b\w+\b', text.lower())
+        keywords = [word for word in words if len(word) > 2 and word not in stop_words]
+        return keywords[:5]
+    
+    def analyze_log_content(self, log_data):
+        """Analyze log content and find errors with solutions"""
+        results = []
+        
+        for log_entry in log_data:
+            content = log_entry.get('content', '')
+            lines = log_entry.get('lines', [])
+            filename = log_entry.get('filename', 'unknown')
+            
+            # Find error lines
+            error_lines = self._find_error_lines(lines)
+            
+            # Analyze each error
+            for line_num, error_line in error_lines:
+                # First try local matching
+                local_analysis = self._analyze_error_line_local(error_line, line_num, filename)
+                
+                # Enhance with AI if API is available
+                ai_enhanced = self._enhance_with_ai(error_line, local_analysis)
+                
+                results.append(ai_enhanced if ai_enhanced else local_analysis)
+        
+        return results
+    
+    def _find_error_lines(self, lines):
+        """Find lines containing errors"""
+        error_lines = []
+        for i, line in enumerate(lines):
+            line_lower = line.lower()
+            if any(keyword in line_lower for keyword in ERROR_KEYWORDS):
+                error_lines.append((i + 1, line))
+        return error_lines
+    
+    def _analyze_error_line_local(self, error_line, line_num, filename):
+        """Analyze error line using local knowledge base"""
+        error_keywords = self._extract_keywords(error_line)
+        best_match = self._find_best_solution_match(error_keywords, error_line)
+        
+        if best_match:
+            return {
+                'filename': filename,
+                'line_number': line_num,
+                'error_line': error_line.strip(),
+                'error_keywords': error_keywords,
+                'matched_solution': best_match['solution'],
+                'original_error': best_match['original_error'],
+                'confidence': best_match['confidence'],
+                'jobname_reference': best_match.get('jobname', ''),
+                'analysis_method': 'local_knowledge_base',
+                'analysis_time': datetime.now().isoformat()
+            }
+        
+        return {
+            'filename': filename,
+            'line_number': line_num,
+            'error_line': error_line.strip(),
+            'error_keywords': error_keywords,
+            'matched_solution': 'No local solution found. Checking with AI...',
+            'confidence': 0.1,
+            'analysis_method': 'local_fallback',
+            'analysis_time': datetime.now().isoformat()
+        }
+    
+    def _enhance_with_ai(self, error_line, local_analysis):
+        """Enhance analysis using Open WebUI API"""
+        try:
+            # Create context from knowledge base
+            knowledge_context = self._build_knowledge_context()
+            
+            prompt = f"""
+You are a log analysis expert. Based on the following knowledge base and error line, provide a specific solution.
+
+KNOWLEDGE BASE EXAMPLES:
+{knowledge_context}
+
+ERROR TO ANALYZE:
+{error_line}
+
+Please provide:
+1. Root cause analysis
+2. Specific solution steps
+3. Prevention recommendations
+
+Keep the response concise and actionable.
+"""
+
+            payload = {
+                "model": AI_MODEL,
+                "messages": [
+                    {"role": "system", "content": "You are an expert log analyzer and troubleshooter."},
+                    {"role": "user", "content": prompt}
+                ],
+                "max_tokens": MAX_TOKENS,
+                "temperature": TEMPERATURE
+            }
+            
+            response = requests.post(self.api_url, headers=self.api_headers, 
+                                   json=payload, timeout=30)
+            
+            if response.status_code == 200:
+                ai_response = response.json()
+                ai_solution = ai_response['choices'][0]['message']['content']
+                
+                # Enhance local analysis with AI insights
+                enhanced_analysis = local_analysis.copy()
+                enhanced_analysis['ai_solution'] = ai_solution
+                enhanced_analysis['matched_solution'] = f"{local_analysis['matched_solution']}\n\nAI ENHANCED SOLUTION:\n{ai_solution}"
+                enhanced_analysis['confidence'] = min(local_analysis['confidence'] + 0.3, 1.0)
+                enhanced_analysis['analysis_method'] = 'ai_enhanced'
+                
+                return enhanced_analysis
+            
+        except Exception as e:
+            logger.error(f"AI enhancement failed: {str(e)}")
+        
+        return local_analysis
+    
+    def _build_knowledge_context(self):
+        """Build context string from knowledge base for AI prompt"""
+        context_examples = []
+        for i, entry in enumerate(self.knowledge_base[:5]):  # Limit to 5 examples
+            context_examples.append(f"Example {i+1}:")
+            context_examples.append(f"Error: {entry.get('error', '')}")
+            context_examples.append(f"Solution: {entry.get('solution', '')}")
+            context_examples.append("")
+        
+        return "\n".join(context_examples)
+    
+    def _find_best_solution_match(self, error_keywords, full_error_line):
+        """Find best matching solution from knowledge base"""
+        best_match = None
+        highest_score = 0
+        
+        for pattern_key, pattern_data in self.error_patterns.items():
+            pattern_keywords = set(pattern_data['keywords'])
+            error_keywords_set = set(error_keywords)
+            
+            if len(pattern_keywords.union(error_keywords_set)) > 0:
+                overlap = len(pattern_keywords.intersection(error_keywords_set))
+                total_keywords = len(pattern_keywords.union(error_keywords_set))
+                keyword_score = overlap / total_keywords
+            else:
+                keyword_score = 0
+            
+            # Text similarity score
+            text_score = 0
+            original_error_lower = pattern_data['original_error'].lower()
+            full_error_lower = full_error_line.lower()
+            
+            common_phrases = self._find_common_phrases(original_error_lower, full_error_lower)
+            if common_phrases:
+                text_score = 0.3
+            
+            combined_score = (keyword_score * 0.7) + (text_score * 0.3)
+            
+            if combined_score > highest_score and combined_score > 0.2:
+                highest_score = combined_score
+                best_match = {
+                    'solution': pattern_data['solution'],
+                    'original_error': pattern_data['original_error'],
+                    'jobname': pattern_data.get('jobname', ''),
+                    'confidence': round(combined_score, 2)
+                }
+        
+        return best_match
+    
+    def _find_common_phrases(self, text1, text2):
+        """Find common phrases between two texts"""
+        words1 = text1.split()
+        words2 = text2.split()
+        
+        common = []
+        for word in words1:
+            if len(word) > 3 and word in words2:
+                common.append(word)
+        
+        return common
+    
+    def generate_summary_report(self, analysis_results):
+        """Generate summary report of analysis"""
+        if not analysis_results:
+            return "No errors found in the uploaded files."
+        
+        total_errors = len(analysis_results)
+        ai_enhanced = len([r for r in analysis_results if r.get('analysis_method') == 'ai_enhanced'])
+        local_solved = len([r for r in analysis_results if r.get('confidence', 0) > 0.5])
+        
+        report = f"""
+LOG ANALYSIS SUMMARY (Open WebUI Enhanced)
+==========================================
+Total Errors Found: {total_errors}
+AI Enhanced Solutions: {ai_enhanced}
+Local Knowledge Solutions: {local_solved}
+Success Rate: {((ai_enhanced + local_solved)/total_errors)*100:.1f}%
+
+API Endpoint: {OPENAI_BASE_URL}
+Model Used: {AI_MODEL}
+
+FILES ANALYZED:
+{', '.join(set([r['filename'] for r in analysis_results]))}
+
+ERROR DISTRIBUTION:
+"""
+        
+        # Group errors by type
+        error_groups = {}
+        for result in analysis_results:
+            key = ' '.join(result.get('error_keywords', [])[:2])
+            if key in error_groups:
+                error_groups[key].append(result)
+            else:
+                error_groups[key] = [result]
+        
+        for error_type, errors in list(error_groups.items())[:5]:
+            report += f"\n• {error_type}: {len(errors)} occurrences"
+        
+        return report
+
+# Test the analyzer
+if __name__ == "__main__":
+    print("Testing Open WebUI AI Analyzer...")
+    sample_kb = [
+        {
+            'jobname': 'TestJob1',
+            'error': 'Connection timeout to database',
+            'solution': 'Check network connectivity and increase timeout values'
+        }
+    ]
+    
+    analyzer = AIAnalyzer(sample_kb)
+    print("✓ AI Analyzer initialized with Open WebUI integration")
+
+
+import json
+from datetime import datetime
+from pathlib import Path
+from config import OUTPUT_DIR
+import logging
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+class SolutionFinder:
+    def __init__(self):
+        pass
+    
+    def find_solutions(self, analysis_results):
+        """Process analysis results and format solutions"""
+        solutions = []
+        
+        for result in analysis_results:
+            solution_entry = {
+                'error_id': self._generate_error_id(result),
+                'file_info': {
+                    'filename': result.get('filename', 'unknown'),
+                    'line_number': result.get('line_number', 0)
+                },
+                'error_details': {
+                    'error_text': result.get('error_line', ''),
+                    'keywords': result.get('error_keywords', []),
+                    'severity': self._assess_severity(result.get('error_line', ''))
+                },
+                'solution': {
+                    'recommended_action': result.get('matched_solution', ''),
+                    'confidence_level': result.get('confidence', 0),
+                    'reference_job': result.get('jobname_reference', ''),
+                    'priority': self._calculate_priority(result),
+                    'analysis_method': result.get('analysis_method', 'unknown')
+                },
+                'metadata': {
+                    'analysis_time': result.get('analysis_time', datetime.now().isoformat()),
+                    'solution_type': 'automated' if result.get('confidence', 0) > 0.5 else 'manual_review'
+                }
+            }
+            solutions.append(solution_entry)
+        
+        # Sort by priority (high confidence and severity first)
+        solutions.sort(key=lambda x: (x['solution']['priority'], x['solution']['confidence_level']), reverse=True)
+        
+        return solutions
+    
+    def _generate_error_id(self, result):
+        """Generate unique error ID"""
+        filename = result.get('filename', 'unknown')
+        line_num = result.get('line_number', 0)
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        return f"ERR_{filename}_{line_num}_{timestamp}"
+    
+    def _assess_severity(self, error_text):
+        """Assess error severity based on keywords"""
+        critical_keywords = ['fatal', 'critical', 'crash', 'abort', 'panic']
+        high_keywords = ['error', 'fail', 'exception', 'denied']
+        medium_keywords = ['warning', 'timeout', 'retry']
+        
+        error_lower = error_text.lower()
+        
+        if any(keyword in error_lower for keyword in critical_keywords):
+            return 'CRITICAL'
+        elif any(keyword in error_lower for keyword in high_keywords):
+            return 'HIGH'
+        elif any(keyword in error_lower for keyword in medium_keywords):
+            return 'MEDIUM'
+        else:
+            return 'LOW'
+    
+    def _calculate_priority(self, result):
+        """Calculate solution priority score"""
+        confidence = result.get('confidence', 0)
+        severity = self._assess_severity(result.get('error_line', ''))
+        
+        severity_scores = {'CRITICAL': 4, 'HIGH': 3, 'MEDIUM': 2, 'LOW': 1}
+        severity_score = severity_scores.get(severity, 1)
+        
+        # Priority = (confidence * 5) + severity_score
+        priority = (confidence * 5) + severity_score
+        return round(priority, 2)
+    
+    def export_solutions(self, solutions, filename_prefix="solutions"):
+        """Export solutions to JSON file"""
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        output_file = OUTPUT_DIR / f"{filename_prefix}_{timestamp}.json"
+        
+        try:
+            with open(output_file, 'w', encoding='utf-8') as f:
+                json.dump(solutions, f, indent=2, ensure_ascii=False)
+            
+            logger.info(f"Solutions exported to: {output_file}")
+            return str(output_file)
+        except Exception as e:
+            logger.error(f"Error exporting solutions: {str(e)}")
+            return None
+    
+    def generate_solution_report(self, solutions):
+        """Generate human-readable solution report"""
+        if not solutions:
+            return "No solutions found."
+        
+        report = f"""
+LOG ANALYSIS SOLUTIONS REPORT
+Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+========================================
+
+SUMMARY:
+• Total Issues Found: {len(solutions)}
+• High Priority Issues: {len([s for s in solutions if s['solution']['priority'] > 6])}
+• Automated Solutions: {len([s for s in solutions if s['metadata']['solution_type'] == 'automated'])}
+• AI Enhanced: {len([s for s in solutions if s['solution']['analysis_method'] == 'ai_enhanced'])}
+
+DETAILED SOLUTIONS:
+"""
+        
+        for i, solution in enumerate(solutions, 1):
+            file_info = solution['file_info']
+            error_details = solution['error_details']
+            solution_info = solution['solution']
+            
+            report += f"""
+{i}. ERROR #{solution['error_id']}
+   File: {file_info['filename']} (Line {file_info['line_number']})
+   Severity: {error_details['severity']}
+   Priority Score: {solution_info['priority']}
+   Analysis Method: {solution_info['analysis_method']}
+   
+   Error: {error_details['error_text'][:100]}...
+   
+   SOLUTION (Confidence: {solution_info['confidence_level']:.1%}):
+   {solution_info['recommended_action']}
+   
+   Reference: {solution_info['reference_job'] or 'Generic solution'}
+   
+   ---
+"""
+        
+        return report
+
+# Test the solution finder
+if __name__ == "__main__":
+    # Sample analysis results for testing
+    sample_results = [
+        {
+            'filename': 'app.log',
+            'line_number': 145,
+            'error_line': 'Database connection timeout after 30 seconds',
+            'error_keywords': ['database', 'connection', 'timeout'],
+            'matched_solution': 'Increase connection timeout and check network',
+            'confidence': 0.85,
+            'analysis_method': 'ai_enhanced'
+        }
+    ]
+    
+    finder = SolutionFinder()
+    solutions = finder.find_solutions(sample_results)
+    print(finder.generate_solution_report(solutions))
+
+import tkinter as tk
+from tkinter import ttk, filedialog, messagebox, scrolledtext
+import threading
+from pathlib import Path
+from file_reader import FileReader
+from ai_analyzer import AIAnalyzer
+from solution_finder import SolutionFinder
+from config import UPLOADS_DIR, SUPPORTED_FORMATS
+
+class LogAnalyzerGUI:
+    def __init__(self):
+        self.root = tk.Tk()
+        self.root.title("Log Analyzer AI - Error Solution Finder (Open WebUI)")
+        self.root.geometry("1000x700")
+        self.root.resizable(True, True)
+        
+        # Initialize components
+        self.file_reader = FileReader()
+        self.ai_analyzer = AIAnalyzer(self.file_reader.get_knowledge_base())
+        self.solution_finder = SolutionFinder()
+        
+        self.setup_ui()
+        
+    def setup_ui(self):
+        # Main frame
+        main_frame = tk.Frame(self.root, padx=20, pady=20)
+        main_frame.pack(fill=tk.BOTH, expand=True)
+        
+        # Title
+        title_label = tk.Label(main_frame, text="Log Analyzer AI (Open WebUI)", 
+                              font=("Arial", 18, "bold"), fg="darkblue")
+        title_label.pack(pady=(0, 20))
+        
+        # Knowledge base status
+        kb_count = len(self.file_reader.get_knowledge_base())
+        status_label = tk.Label(main_frame, 
+                               text=f"Knowledge Base: {kb_count} solutions loaded from input folder",
+                               font=("Arial", 10), fg="green")
+        status_label.pack(pady=(0, 10))
+        
+        # File upload section
+        upload_frame = tk.LabelFrame(main_frame, text="Upload Log File for Analysis", 
+                                   font=("Arial", 12, "bold"), padx=10, pady=10)
+        upload_frame.pack(fill=tk.X, pady=(0, 20))
+        
+        # File selection
+        file_frame = tk.Frame(upload_frame)
+        file_frame.pack(fill=tk.X, pady=5)
+        
+        self.file_path_var = tk.StringVar()
+        self.file_entry = tk.Entry(file_frame, textvariable=self.file_path_var, 
+                                  font=("Arial", 10), width=60)
+        self.file_entry.pack(side=tk.LEFT, padx=(0, 10), fill=tk.X, expand=True)
+        
+        browse_button = tk.Button(file_frame, text="Browse Files", 
+                                command=self.browse_file, bg="#4CAF50", 
+                                fg="white", font=("Arial", 10, "bold"))
+        browse_button.pack(side=tk.RIGHT)
+        
+        # Analyze button
+        self.analyze_button = tk.Button(upload_frame, text="🔍 Analyze Logs & Find Solutions", 
+                                      command=self.start_analysis, bg="#2196F3", 
+                                      fg="white", font=("Arial", 12, "bold"), pady=10)
+        self.analyze_button.pack(pady=10, fill=tk.X)
+        
+        # Progress bar
+        self.progress_var = tk.StringVar(value="Ready to analyze logs...")
+        progress_label = tk.Label(upload_frame, textvariable=self.progress_var, 
+                                font=("Arial", 10), fg="blue")
+        progress_label.pack(pady=5)
+        
+        self.progress_bar = ttk.Progressbar(upload_frame, mode='indeterminate')
+        self.progress_bar.pack(fill=tk.X, pady=5)
+        
+        # Results section
+        results_frame = tk.LabelFrame(main_frame, text="Analysis Results & Solutions", 
+                                    font=("Arial", 12, "bold"), padx=10, pady=10)
+        results_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
+        
+        # Results text area
+        self.results_text = scrolledtext.ScrolledText(results_frame, wrap=tk.WORD, 
+                                                    font=("Consolas", 10), height=20)
+        self.results_text.pack(fill=tk.BOTH, expand=True, pady=5)
+        
+        # Action buttons
+        button_frame = tk.Frame(main_frame)
+        button_frame.pack(fill=tk.X, pady=10)
+        
+        self.export_button = tk.Button(button_frame, text="💾 Export Solutions", 
+                                     command=self.export_solutions, state=tk.DISABLED,
+                                     bg="#FF9800", fg="white", font=("Arial", 10))
+        self.export_button.pack(side=tk.LEFT, padx=(0, 10))
+        
+        clear_button = tk.Button(button_frame, text="🗑️ Clear Results", 
+                               command=self.clear_results, bg="#f44336", 
+                               fg="white", font=("Arial", 10))
+        clear_button.pack(side=tk.LEFT)
+        
+        # Store results for export
+        self.current_solutions = []
+    
+    def browse_file(self):
+        """Open file browser to select log file"""
+        filetypes = [
+            ('All Supported', '*' + ';*'.join(SUPPORTED_FORMATS)),
+            ('Log Files', '*.txt;*.log'),
+            ('Excel Files', '*.xlsx;*.csv'),
+            ('JSON Files', '*.json'),
+            ('ZIP Files', '*.zip'),
+            ('All Files', '*.*')
+        ]
+        
+        file_path = filedialog.askopenfilename(
+            title="Select Log File to Analyze",
+            filetypes=filetypes
+        )
+        
+        if file_path:
+            self.file_path_var.set(file_path)
+    
+    def start_analysis(self):
+        """Start log analysis in separate thread"""
+        file_path = self.file_path_var.get().strip()
+        
+        if not file_path:
+            messagebox.showerror("Error", "Please select a file to analyze.")
+            return
+        
+        if not Path(file_path).exists():
+            messagebox.showerror("Error", "Selected file does not exist.")
+            return
+        
+        # Disable analyze button and start progress
+        self.analyze_button.config(state=tk.DISABLED)
+        self.progress_bar.start()
+        
+        # Run analysis in separate thread
+        thread = threading.Thread(target=self.analyze_file, args=(file_path,))
+        thread.daemon = True
+        thread.start()
+    
+    def analyze_file(self, file_path):
+        """Analyze the selected file"""
+        try:
+            # Update progress
+            self.update_progress("Reading uploaded file...")
+            
+            # Read the file
+            log_data = self.file_reader.read_uploaded_file(file_path)
+            
+            if not log_data:
+                raise Exception("Could not read the file or file is empty")
+            
+            # Analyze with AI
+            self.update_progress("Analyzing errors and finding solutions...")
+            analysis_results = self.ai_analyzer.analyze_log_content(log_data)
+            
+            # Find solutions
+            self.update_progress("Matching errors with solutions...")
+            solutions = self.solution_finder.find_solutions(analysis_results)
+            
+            # Generate report
+            self.update_progress("Generating solution report...")
+            report = self.solution_finder.generate_solution_report(solutions)
+            summary = self.ai_analyzer.generate_summary_report(analysis_results)
+            
+            # Update UI with results
+            self.display_results(report, summary, solutions)
+            
+        except Exception as e:
+            self.show_error(f"Analysis failed: {str(e)}")
+        finally:
+            # Re-enable button and stop progress
+            self.root.after(0, lambda: self.analyze_button.config(state=tk.NORMAL))
+            self.root.after(0, lambda: self.progress_bar.stop())
+    
+    def update_progress(self, message):
+        """Update progress message"""
+        self.root.after(0, lambda: self.progress_var.set(message))
+    
+    def display_results(self, report, summary, solutions):
+        """Display analysis results in GUI"""
+        def update_ui():
+            self.results_text.delete(1.0, tk.END)
+            
+            # Insert summary first
+            self.results_text.insert(tk.END, summary + "\n\n")
+            self.results_text.insert(tk.END, "=" * 80 + "\n\n")
+            
+            # Insert detailed report
+            self.results_text.insert(tk.END, report)
+            
+            # Store solutions for export
+            self.current_solutions = solutions
+            self.export_button.config(state=tk.NORMAL)
+            
+            # Update progress
+            self.progress_var.set(f"✅ Analysis complete! Found {len(solutions)} issues with solutions.")
+        
+        self.root.after(0, update_ui)
+    
+    def show_error(self, message):
+        """Show error message"""
+        self.root.after(0, lambda: messagebox.showerror("Analysis Error", message))
+        self.root.after(0, lambda: self.progress_var.set("❌ Analysis failed. Please try again."))
+    
+    def export_solutions(self):
+        """Export solutions to JSON file"""
+        if not self.current_solutions:
+            messagebox.showwarning("Warning", "No solutions to export.")
+            return
+        
+        try:
+            output_file = self.solution_finder.export_solutions(self.current_solutions)
+            if output_file:
+                messagebox.showinfo("Export Successful", 
+                                  f"Solutions exported to:\n{output_file}")
+            else:
+                messagebox.showerror("Export Failed", "Could not export solutions.")
+        except Exception as e:
+            messagebox.showerror("Export Error", f"Export failed: {str(e)}")
+    
+    def clear_results(self):
+        """Clear all results"""
+        self.results_text.delete(1.0, tk.END)
+        self.current_solutions = []
+        self.export_button.config(state=tk.DISABLED)
+        self.progress_var.set("Results cleared. Ready for new analysis.")
+    
+    def run(self):
+        """Start the GUI application"""
+        self.root.mainloop()
+
+# Main execution
+if __name__ == "__main__":
+    try:
+        app = LogAnalyzerGUI()
+        app.run()
+    except Exception as e:
+        print(f"Application failed to start: {str(e)}")
+        input("Press Enter to exit...")
+
+
+# Core dependencies
+pandas>=1.5.0
+openpyxl>=3.0.0
+python-dotenv>=1.0.0
+
+# API integration
+requests>=2.28.0
+
+# Built-in Python modules (no need to install)
+# tkinter, pathlib, logging, zipfile, json, re, datetime, threading
+
+
+
