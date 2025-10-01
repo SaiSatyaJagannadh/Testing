@@ -5,6 +5,7 @@ import urllib3
 from datetime import datetime
 from config import OPENAI_API_KEY, OPENAI_BASE_URL, AI_MODEL, MAX_TOKENS, TEMPERATURE, ERROR_KEYWORDS
 import logging
+import time
 
 # Disable SSL warnings
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -20,6 +21,7 @@ class AIAnalyzer:
             "Authorization": f"Bearer {OPENAI_API_KEY}",
             "Content-Type": "application/json"
         }
+        
         # Fix the URL - remove duplicate /chat/completions
         base_url = OPENAI_BASE_URL.rstrip('/')
         if base_url.endswith('/chat/completions'):
@@ -27,49 +29,65 @@ class AIAnalyzer:
         else:
             self.api_url = f"{base_url}/chat/completions"
         
-        # Configure session with SSL bypass
+        # Configure session with SSL bypass and longer timeout
         self.session = requests.Session()
         self.session.headers.update(self.api_headers)
         self.session.verify = False  # Disable SSL verification
         
-        # Test API connection
+        # Pre-build AI context from knowledge base (do this once at startup)
+        self.knowledge_context = self._build_knowledge_context()
+        self.api_available = False
+        
+        # Test API connection and cache availability
         self._test_api_connection()
+        
+        logger.info(f"AI Analyzer initialized with {len(self.knowledge_base)} knowledge entries")
+        logger.info(f"Built {len(self.error_patterns)} error patterns for quick matching")
+        logger.info(f"API Status: {'Available' if self.api_available else 'Offline - using local knowledge only'}")
     
     def _test_api_connection(self):
         """Test connection to API with SSL bypass"""
         try:
             test_payload = {
                 "model": AI_MODEL,
-                "messages": [{"role": "user", "content": "Hello"}],
-                "max_tokens": 10
+                "messages": [{"role": "user", "content": "test"}],
+                "max_tokens": 5
             }
             
             logger.info(f"Testing API connection to: {self.api_url}")
             
-            response = self.session.post(self.api_url, json=test_payload, timeout=10)
+            # Use shorter timeout for connection test
+            response = self.session.post(self.api_url, json=test_payload, timeout=5)
             
             if response.status_code == 200:
-                logger.info("✓ Successfully connected to API")
+                logger.info("✓ API connection successful - AI enhancement available")
+                self.api_available = True
             elif response.status_code == 401:
-                logger.warning("API key authentication failed - check your credentials")
+                logger.warning("⚠ API key authentication failed - using local knowledge only")
+                self.api_available = False
             elif response.status_code == 404:
-                logger.warning("API endpoint not found - check the URL")
+                logger.warning("⚠ API endpoint not found - using local knowledge only")
+                self.api_available = False
             else:
-                logger.warning(f"API connection test returned status: {response.status_code}")
-                logger.warning(f"Response: {response.text}")
+                logger.warning(f"⚠ API returned status {response.status_code} - using local knowledge only")
+                self.api_available = False
                 
-        except requests.exceptions.SSLError as e:
-            logger.error(f"SSL Error: {str(e)}")
-            logger.info("Continuing with offline analysis only...")
-        except requests.exceptions.ConnectionError as e:
-            logger.error(f"Connection Error: {str(e)}")
-            logger.info("Continuing with offline analysis only...")
+        except requests.exceptions.Timeout:
+            logger.warning("⚠ API connection timeout - using local knowledge only")
+            self.api_available = False
+        except requests.exceptions.SSLError:
+            logger.warning("⚠ SSL error - using local knowledge only")
+            self.api_available = False
+        except requests.exceptions.ConnectionError:
+            logger.warning("⚠ Connection error - using local knowledge only")
+            self.api_available = False
         except Exception as e:
-            logger.error(f"API connection test failed: {str(e)}")
-            logger.info("Continuing with offline analysis only...")
+            logger.warning(f"⚠ API test failed: {str(e)} - using local knowledge only")
+            self.api_available = False
     
     def _build_error_patterns(self):
-        """Build error patterns from knowledge base"""
+        """Build error patterns from knowledge base (DONE AT STARTUP)"""
+        logger.info("Building error patterns from knowledge base...")
         patterns = {}
         for entry in self.knowledge_base:
             error_text = str(entry.get('error', '')).lower()
@@ -84,7 +102,23 @@ class AIAnalyzer:
                         'jobname': entry.get('jobname', ''),
                         'keywords': key_words
                     }
+        logger.info(f"✓ Built {len(patterns)} error patterns for fast matching")
         return patterns
+    
+    def _build_knowledge_context(self):
+        """Build context string from knowledge base (DONE AT STARTUP)"""
+        logger.info("Preparing AI context from knowledge base...")
+        context_examples = []
+        for i, entry in enumerate(self.knowledge_base[:10]):  # Use more examples for better context
+            context_examples.append(f"Example {i+1}:")
+            context_examples.append(f"Job: {entry.get('jobname', 'N/A')}")
+            context_examples.append(f"Error: {entry.get('error', '')}")
+            context_examples.append(f"Solution: {entry.get('solution', '')}")
+            context_examples.append("")
+        
+        context = "\n".join(context_examples)
+        logger.info(f"✓ Prepared AI context with {len(self.knowledge_base)} examples")
+        return context
     
     def _extract_keywords(self, text):
         """Extract meaningful keywords from error text"""
@@ -94,31 +128,36 @@ class AIAnalyzer:
         return keywords[:5]
     
     def analyze_log_content(self, log_data):
-        """Analyze log content and find errors with solutions"""
+        """Analyze log content and find errors with solutions (FAST - uses pre-built patterns)"""
         results = []
+        
+        logger.info(f"Analyzing {len(log_data)} log files...")
         
         for log_entry in log_data:
             content = log_entry.get('content', '')
             lines = log_entry.get('lines', [])
             filename = log_entry.get('filename', 'unknown')
             
-            # Find error lines
+            # Find error lines (FAST)
             error_lines = self._find_error_lines(lines)
+            logger.info(f"Found {len(error_lines)} errors in {filename}")
             
-            # Analyze each error
+            # Analyze each error (uses pre-built patterns)
             for line_num, error_line in error_lines:
-                # First try local matching
+                # Local analysis (INSTANT - uses pre-built patterns)
                 local_analysis = self._analyze_error_line_local(error_line, line_num, filename)
                 
-                # Enhance with AI if API is available
-                ai_enhanced = self._enhance_with_ai(error_line, local_analysis)
-                
-                results.append(ai_enhanced if ai_enhanced else local_analysis)
+                # AI enhancement with better timeout handling
+                if self.api_available and local_analysis.get('confidence', 0) < 0.7:
+                    ai_enhanced = self._enhance_with_ai_safe(error_line, local_analysis)
+                    results.append(ai_enhanced if ai_enhanced else local_analysis)
+                else:
+                    results.append(local_analysis)
         
         return results
     
     def _find_error_lines(self, lines):
-        """Find lines containing errors"""
+        """Find lines containing errors (FAST)"""
         error_lines = []
         for i, line in enumerate(lines):
             line_lower = line.lower()
@@ -127,11 +166,11 @@ class AIAnalyzer:
         return error_lines
     
     def _analyze_error_line_local(self, error_line, line_num, filename):
-        """Analyze error line using local knowledge base"""
+        """Analyze error line using pre-built patterns (INSTANT)"""
         error_keywords = self._extract_keywords(error_line)
         best_match = self._find_best_solution_match(error_keywords, error_line)
         
-        if best_match:
+        if best_match and best_match['confidence'] > 0.3:
             return {
                 'filename': filename,
                 'line_number': line_num,
@@ -150,81 +189,79 @@ class AIAnalyzer:
             'line_number': line_num,
             'error_line': error_line.strip(),
             'error_keywords': error_keywords,
-            'matched_solution': 'No local solution found. Checking with AI...',
+            'matched_solution': 'Low confidence local match. May need AI enhancement.',
             'confidence': 0.1,
             'analysis_method': 'local_fallback',
             'analysis_time': datetime.now().isoformat()
         }
     
-    def _enhance_with_ai(self, error_line, local_analysis):
-        """Enhance analysis using API with SSL bypass"""
-        try:
-            # Create context from knowledge base
-            knowledge_context = self._build_knowledge_context()
-            
-            prompt = f"""
-You are a log analysis expert. Based on the following knowledge base and error line, provide a specific solution.
+    def _enhance_with_ai_safe(self, error_line, local_analysis):
+        """Enhance analysis using API with proper timeout and retry handling"""
+        if not self.api_available:
+            return local_analysis
+        
+        max_retries = 2
+        retry_delay = 1  # seconds
+        
+        for attempt in range(max_retries):
+            try:
+                prompt = f"""
+Based on the knowledge base examples, analyze this error and provide a solution:
 
-KNOWLEDGE BASE EXAMPLES:
-{knowledge_context}
+KNOWLEDGE BASE:
+{self.knowledge_context}
 
 ERROR TO ANALYZE:
 {error_line}
 
-Please provide:
-1. Root cause analysis
-2. Specific solution steps
-3. Prevention recommendations
-
-Keep the response concise and actionable.
+Provide a clear, actionable solution with specific steps.
 """
 
-            payload = {
-                "model": AI_MODEL,
-                "messages": [
-                    {"role": "system", "content": "You are an expert log analyzer and troubleshooter."},
-                    {"role": "user", "content": prompt}
-                ],
-                "max_tokens": MAX_TOKENS,
-                "temperature": TEMPERATURE
-            }
-            
-            response = self.session.post(self.api_url, json=payload, timeout=30)
-            
-            if response.status_code == 200:
-                ai_response = response.json()
-                ai_solution = ai_response['choices'][0]['message']['content']
+                payload = {
+                    "model": AI_MODEL,
+                    "messages": [
+                        {"role": "system", "content": "You are an expert log analyzer. Provide concise, actionable solutions."},
+                        {"role": "user", "content": prompt}
+                    ],
+                    "max_tokens": MAX_TOKENS,
+                    "temperature": TEMPERATURE
+                }
                 
-                # Enhance local analysis with AI insights
-                enhanced_analysis = local_analysis.copy()
-                enhanced_analysis['ai_solution'] = ai_solution
-                enhanced_analysis['matched_solution'] = f"{local_analysis['matched_solution']}\n\nAI ENHANCED SOLUTION:\n{ai_solution}"
-                enhanced_analysis['confidence'] = min(local_analysis['confidence'] + 0.3, 1.0)
-                enhanced_analysis['analysis_method'] = 'ai_enhanced'
+                # Use longer timeout for actual AI calls
+                response = self.session.post(self.api_url, json=payload, timeout=45)
                 
-                logger.info("✓ Successfully enhanced solution with AI")
-                return enhanced_analysis
-            else:
-                logger.warning(f"AI API returned status {response.status_code}: {response.text}")
-            
-        except Exception as e:
-            logger.error(f"AI enhancement failed: {str(e)}")
+                if response.status_code == 200:
+                    ai_response = response.json()
+                    ai_solution = ai_response['choices'][0]['message']['content']
+                    
+                    # Enhance local analysis with AI insights
+                    enhanced_analysis = local_analysis.copy()
+                    enhanced_analysis['ai_solution'] = ai_solution
+                    enhanced_analysis['matched_solution'] = f"{local_analysis['matched_solution']}\n\n🤖 AI ENHANCED SOLUTION:\n{ai_solution}"
+                    enhanced_analysis['confidence'] = min(local_analysis['confidence'] + 0.4, 1.0)
+                    enhanced_analysis['analysis_method'] = 'ai_enhanced'
+                    
+                    logger.info("✓ Successfully enhanced solution with AI")
+                    return enhanced_analysis
+                else:
+                    logger.warning(f"AI API returned status {response.status_code} on attempt {attempt + 1}")
+                    
+            except requests.exceptions.Timeout:
+                logger.warning(f"AI API timeout on attempt {attempt + 1}/{max_retries}")
+                if attempt < max_retries - 1:
+                    time.sleep(retry_delay)
+                    retry_delay *= 2  # Exponential backoff
+            except Exception as e:
+                logger.warning(f"AI enhancement failed on attempt {attempt + 1}: {str(e)}")
+                if attempt < max_retries - 1:
+                    time.sleep(retry_delay)
         
+        # If all attempts failed, return local analysis
+        logger.warning("AI enhancement failed after all retries - using local solution")
         return local_analysis
     
-    def _build_knowledge_context(self):
-        """Build context string from knowledge base for AI prompt"""
-        context_examples = []
-        for i, entry in enumerate(self.knowledge_base[:5]):  # Limit to 5 examples
-            context_examples.append(f"Example {i+1}:")
-            context_examples.append(f"Error: {entry.get('error', '')}")
-            context_examples.append(f"Solution: {entry.get('solution', '')}")
-            context_examples.append("")
-        
-        return "\n".join(context_examples)
-    
     def _find_best_solution_match(self, error_keywords, full_error_line):
-        """Find best matching solution from knowledge base"""
+        """Find best matching solution from pre-built patterns (FAST)"""
         best_match = None
         highest_score = 0
         
@@ -246,7 +283,7 @@ Keep the response concise and actionable.
             
             common_phrases = self._find_common_phrases(original_error_lower, full_error_lower)
             if common_phrases:
-                text_score = 0.3
+                text_score = len(common_phrases) * 0.1  # Better scoring for multiple matches
             
             combined_score = (keyword_score * 0.7) + (text_score * 0.3)
             
@@ -290,9 +327,10 @@ AI Enhanced Solutions: {ai_enhanced}
 Local Knowledge Solutions: {local_solved}
 Success Rate: {((ai_enhanced + local_solved)/total_errors)*100:.1f}%
 
-API Endpoint: {self.api_url}
+Knowledge Base: {len(self.knowledge_base)} pre-loaded solutions
+Error Patterns: {len(self.error_patterns)} built for fast matching
+API Status: {'Available' if self.api_available else 'Offline'}
 Model Used: {AI_MODEL}
-SSL Verification: Disabled (for corporate networks)
 
 FILES ANALYZED:
 {', '.join(set([r['filename'] for r in analysis_results]))}
@@ -316,7 +354,7 @@ ERROR DISTRIBUTION:
 
 # Test the analyzer
 if __name__ == "__main__":
-    print("Testing UBS AI Analyzer with SSL bypass...")
+    print("Testing UBS AI Analyzer with optimized startup...")
     sample_kb = [
         {
             'jobname': 'TestJob1',
@@ -326,18 +364,4 @@ if __name__ == "__main__":
     ]
     
     analyzer = AIAnalyzer(sample_kb)
-    print("✓ AI Analyzer initialized with UBS API integration")
-
-
-
-# Core dependencies
-pandas>=1.5.0
-openpyxl>=3.0.0
-python-dotenv>=1.0.0
-
-# API integration with SSL bypass
-requests>=2.28.0
-urllib3>=2.0.4
-
-# Built-in Python modules (no need to install)
-# tkinter, pathlib, logging, zipfile, json, re, datetime, threading
+    print("✓ AI Analyzer ready - knowledge base pre-loaded for fast analysis")
