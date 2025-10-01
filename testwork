@@ -3,8 +3,6 @@ import json
 import requests
 import urllib3
 import logging
-import datetime  # Fix 1: Import datetime module
-from datetime import datetime as dt  # Fix 2: Import datetime class
 from config import OPENAI_API_KEY, OPENAI_BASE_URL, AI_MODEL, MAX_TOKENS, TEMPERATURE, ERROR_KEYWORDS
 
 # Disable SSL warnings
@@ -34,12 +32,12 @@ class AIAnalyzer:
         self.session.headers.update(self.api_headers)
         self.session.verify = False
         
-        # Pre-build everything for speed
+        # Pre-build everything
         self.knowledge_context = self._build_knowledge_context()
         self.api_available = self._test_api_connection()
         
         logger.info(f"✓ AI Analyzer: {len(self.knowledge_base)} solutions loaded")
-        logger.info(f"✓ Built {len(self.error_patterns)} patterns for matching")
+        logger.info(f"✓ Built {len(self.error_patterns)} patterns")
     
     def _test_api_connection(self):
         """Quick API test"""
@@ -82,7 +80,7 @@ class AIAnalyzer:
         return patterns
     
     def _build_knowledge_context(self):
-        """Build AI context once at startup"""
+        """Build AI context"""
         context_examples = []
         for i, entry in enumerate(self.knowledge_base[:5]):
             context_examples.append(f"Error: {entry.get('error', '')}")
@@ -92,7 +90,7 @@ class AIAnalyzer:
         return "\n".join(context_examples)
     
     def analyze_log_content(self, log_data):
-        """Analyze log content with datetime fix"""
+        """Analyze log content - NO DATETIME"""
         results = []
         
         for log_entry in log_data:
@@ -106,8 +104,8 @@ class AIAnalyzer:
             logger.info(f"🔍 Found {len(error_lines)} errors")
             
             # Process errors
-            for line_num, error_line in error_lines[:10]:  # Limit to 10 errors
-                result = self._analyze_error_safe(error_line, line_num, filename)
+            for line_num, error_line in error_lines[:10]:
+                result = self._analyze_error_simple(error_line, line_num, filename)
                 results.append(result)
         
         return results
@@ -116,23 +114,18 @@ class AIAnalyzer:
         """Find errors quickly"""
         error_lines = []
         
-        for i, line in enumerate(lines[:500]):  # Only check first 500 lines
+        for i, line in enumerate(lines[:500]):
             line_lower = line.lower()
             if any(keyword in line_lower for keyword in ERROR_KEYWORDS):
                 error_lines.append((i + 1, line))
                 
-                if len(error_lines) >= 20:  # Max 20 errors
+                if len(error_lines) >= 20:
                     break
         
         return error_lines
     
-    def _analyze_error_safe(self, error_line, line_num, filename):
-        """Safe error analysis with fixed datetime"""
-        try:
-            current_time = dt.now().isoformat()  # Use dt instead of datetime
-        except:
-            current_time = "2025-10-01T00:00:00"  # Fallback time
-        
+    def _analyze_error_simple(self, error_line, line_num, filename):
+        """Simple error analysis - NO DATETIME"""
         error_keywords = self._extract_keywords(error_line)
         best_match = self._find_best_solution_match(error_keywords, error_line)
         
@@ -144,8 +137,7 @@ class AIAnalyzer:
                 'matched_solution': best_match['solution'],
                 'confidence': best_match['confidence'],
                 'jobname_reference': best_match.get('jobname', ''),
-                'analysis_method': 'local_knowledge',
-                'analysis_time': current_time
+                'analysis_method': 'local_knowledge'
             }
         else:
             return {
@@ -154,8 +146,7 @@ class AIAnalyzer:
                 'error_line': error_line.strip()[:100],
                 'matched_solution': 'No strong local match found',
                 'confidence': 0.2,
-                'analysis_method': 'local_low',
-                'analysis_time': current_time
+                'analysis_method': 'local_low'
             }
     
     def _extract_keywords(self, text):
@@ -204,7 +195,7 @@ LOG ANALYSIS SUMMARY
 Total Errors: {total_errors}
 High Confidence Solutions: {high_confidence}
 Knowledge Base: {len(self.knowledge_base)} solutions
-Success Rate: {(high_confidence/total_errors)*100:.1f}%
+Success Rate: {(high_confidence/total_errors)*100:.1f}% if total_errors > 0 else 0%
 
 FILES ANALYZED:
 {', '.join(set([r['filename'] for r in analysis_results]))}
