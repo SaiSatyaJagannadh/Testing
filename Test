@@ -1,97 +1,97 @@
-What’s New In Python 3.13
-Editors:
-Adam Turner and Thomas Wouters
+LogScraperProject/
+│
+├── filecreation.py                   # RUN THIS FIRST - Creates entire structure
+│
+├── main.py                           # Main entry point (run after filecreation.py)
+│
+├── requirements.txt                  # Python dependencies
+│
+├── README.md                         # Project documentation
+│
+├── .gitignore                        # Git ignore file
+│
+├── config.yaml                       # OPTIONAL config (defaults in code)
+│
+├── src/
+│   ├── __init__.py
+│   │
+│   ├── extractors/
+│   │   ├── __init__.py
+│   │   └── zip_extractor.py         # Extract ZIP + read log files
+│   │
+│   ├── parsers/
+│   │   ├── __init__.py
+│   │   └── log_parser.py            # Parse timestamps + errors
+│   │
+│   ├── processors/
+│   │   ├── __init__.py
+│   │   └── log_processor.py         # Orchestrates extraction and parsing
+│   │
+│   ├── exporters/
+│   │   ├── __init__.py
+│   │   └── excel_exporter.py        # Export to Excel format
+│   │
+│   └── utils/
+│       ├── __init__.py
+│       └── config_loader.py         # Load config + file operations
+│
+└── data/
+    ├── input/                        # Place ZIP files here
+    └── output/                       # Excel files generated here
 
-This article explains the new features in Python 3.13, compared to 3.12. Python 3.13 was released on October 7, 2024. For full details, see the changelog.
 
-See also PEP 719 – Python 3.13 Release Schedule
-Summary – Release Highlights
-Python 3.13 is the latest stable release of the Python programming language, with a mix of changes to the language, the implementation and the standard library. The biggest changes include a new interactive interpreter, experimental support for running in a free-threaded mode (PEP 703), and a Just-In-Time compiler (PEP 744).
 
-Error messages continue to improve, with tracebacks now highlighted in color by default. The locals() builtin now has defined semantics for changing the returned mapping, and type parameters now support default values.
 
-The library changes contain removal of deprecated APIs and modules, as well as the usual improvements in user-friendliness and correctness. Several legacy standard library modules have now been removed following their deprecation in Python 3.11 (PEP 594).
 
-This article doesn’t attempt to provide a complete specification of all new features, but instead gives a convenient overview. For full details refer to the documentation, such as the Library Reference and Language Reference. To understand the complete implementation and design rationale for a change, refer to the PEP for a particular new feature; but note that PEPs usually are not kept up-to-date once a feature has been fully implemented. See Porting to Python 3.13 for guidance on upgrading from earlier versions of Python.
+"""
+File Creation Script for LogScraperProject
+Usage: python filecreation.py
+"""
+from pathlib import Path
 
-Interpreter improvements:
 
-A greatly improved interactive interpreter and improved error messages.
+def create_project_structure():
+    base_dir = Path("LogScraperProject")
+    
+    # Create directories
+    directories = [
+        base_dir,
+        base_dir / "src",
+        base_dir / "src" / "extractors",
+        base_dir / "src" / "parsers",
+        base_dir / "src" / "processors",
+        base_dir / "src" / "exporters",
+        base_dir / "src" / "utils",
+        base_dir / "data" / "input",
+        base_dir / "data" / "output",
+    ]
+    
+    for directory in directories:
+        directory.mkdir(parents=True, exist_ok=True)
+        print(f"✓ Created: {directory}")
+    
+    # Create empty __init__.py files
+    init_files = [
+        base_dir / "src" / "__init__.py",
+        base_dir / "src" / "extractors" / "__init__.py",
+        base_dir / "src" / "parsers" / "__init__.py",
+        base_dir / "src" / "processors" / "__init__.py",
+        base_dir / "src" / "exporters" / "__init__.py",
+        base_dir / "src" / "utils" / "__init__.py",
+    ]
+    
+    for init_file in init_files:
+        init_file.touch()
+        print(f"✓ Created: {init_file}")
+    
+    print("\n✓ PROJECT STRUCTURE CREATED!")
+    print("\nNext steps:")
+    print("1. Copy all .py files into LogScraperProject/")
+    print("2. cd LogScraperProject")
+    print("3. pip install -r requirements.txt")
+    print("4. Place ZIP files in data/input/")
+    print("5. python main.py")
 
-PEP 667: The locals() builtin now has defined semantics when mutating the returned mapping. Python debuggers and similar tools may now more reliably update local variables in optimized scopes even during concurrent code execution.
 
-PEP 703: CPython 3.13 has experimental support for running with the global interpreter lock disabled. See Free-threaded CPython for more details.
-
-PEP 744: A basic JIT compiler was added. It is currently disabled by default (though we may turn it on later). Performance improvements are modest – we expect to improve this over the next few releases.
-
-Color support in the new interactive interpreter, as well as in tracebacks and doctest output. This can be disabled through the PYTHON_COLORS and NO_COLOR environment variables.
-
-Python data model improvements:
-
-__static_attributes__ stores the names of attributes accessed through self.X in any function in a class body.
-
-__firstlineno__ records the first line number of a class definition.
-
-Significant improvements in the standard library:
-
-Add a new PythonFinalizationError exception, raised when an operation is blocked during finalization.
-
-The argparse module now supports deprecating command-line options, positional arguments, and subcommands.
-
-The new functions base64.z85encode() and base64.z85decode() support encoding and decoding Z85 data.
-
-The copy module now has a copy.replace() function, with support for many builtin types and any class defining the __replace__() method.
-
-The new dbm.sqlite3 module is now the default dbm backend.
-
-The os module has a suite of new functions for working with Linux’s timer notification file descriptors.
-
-The random module now has a command-line interface.
-
-Security improvements:
-
-ssl.create_default_context() sets ssl.VERIFY_X509_PARTIAL_CHAIN and ssl.VERIFY_X509_STRICT as default flags.
-
-C API improvements:
-
-The Py_mod_gil slot is now used to indicate that an extension module supports running with the GIL disabled.
-
-The PyTime C API has been added, providing access to system clocks.
-
-PyMutex is a new lightweight mutex that occupies a single byte.
-
-There is a new suite of functions for generating PEP 669 monitoring events in the C API.
-
-New typing features:
-
-PEP 696: Type parameters (typing.TypeVar, typing.ParamSpec, and typing.TypeVarTuple) now support defaults.
-
-PEP 702: The new warnings.deprecated() decorator adds support for marking deprecations in the type system and at runtime.
-
-PEP 705: typing.ReadOnly can be used to mark an item of a typing.TypedDict as read-only for type checkers.
-
-PEP 742: typing.TypeIs provides more intuitive type narrowing behavior, as an alternative to typing.TypeGuard.
-
-Platform support:
-
-PEP 730: Apple’s iOS is now an officially supported platform, at tier 3.
-
-PEP 738: Android is now an officially supported platform, at tier 3.
-
-wasm32-wasi is now supported as a tier 2 platform.
-
-wasm32-emscripten is no longer an officially supported platform.
-
-Important removals:
-
-PEP 594: The remaining 19 “dead batteries” (legacy stdlib modules) have been removed from the standard library: aifc, audioop, cgi, cgitb, chunk, crypt, imghdr, mailcap, msilib, nis, nntplib, ossaudiodev, pipes, sndhdr, spwd, sunau, telnetlib, uu and xdrlib.
-
-Remove the 2to3 tool and lib2to3 module (deprecated in Python 3.11).
-
-Remove the tkinter.tix module (deprecated in Python 3.6).
-
-Remove the locale.resetlocale() function.
-
-Remove the typing.io and typing.re namespaces.
-
-Remove chained classmethod descriptors.
+if __name__ == "__main__":
+    create_project_structure()
