@@ -1,97 +1,573 @@
-What’s New In Python 3.13
-Editors:
-Adam Turner and Thomas Wouters
+main.py
 
-This article explains the new features in Python 3.13, compared to 3.12. Python 3.13 was released on October 7, 2024. For full details, see the changelog.
 
-See also PEP 719 – Python 3.13 Release Schedule
-Summary – Release Highlights
-Python 3.13 is the latest stable release of the Python programming language, with a mix of changes to the language, the implementation and the standard library. The biggest changes include a new interactive interpreter, experimental support for running in a free-threaded mode (PEP 703), and a Just-In-Time compiler (PEP 744).
+"""
+Main Entry Point for Log Scraper Project
+Usage: python main.py
+"""
+from src.processors.log_processor import LogProcessor
+from src.exporters.excel_exporter import ExcelExporter
+from pathlib import Path
 
-Error messages continue to improve, with tracebacks now highlighted in color by default. The locals() builtin now has defined semantics for changing the returned mapping, and type parameters now support default values.
 
-The library changes contain removal of deprecated APIs and modules, as well as the usual improvements in user-friendliness and correctness. Several legacy standard library modules have now been removed following their deprecation in Python 3.11 (PEP 594).
+def main():
+    print("=" * 50)
+    print("   LOG SCRAPER PROJECT - WMA JobFailure")
+    print("=" * 50)
+    
+    # Initialize processor
+    processor = LogProcessor()
+    
+    # Process all ZIP files
+    print("\nProcessing ZIP files from data/input/...")
+    results = processor.process_all_zips()
+    
+    # Export to Excel
+    if results:
+        print(f"\nFound {len(results)} error entries")
+        exporter = ExcelExporter()
+        output_file = exporter.export(results)
+        print(f"\n✓ SUCCESS! Output saved to: {output_file}")
+    else:
+        print("\n⚠ No error logs found to process")
+        print("  Please place ZIP files in data/input/ folder")
+    
+    print("\n" + "=" * 50)
 
-This article doesn’t attempt to provide a complete specification of all new features, but instead gives a convenient overview. For full details refer to the documentation, such as the Library Reference and Language Reference. To understand the complete implementation and design rationale for a change, refer to the PEP for a particular new feature; but note that PEPs usually are not kept up-to-date once a feature has been fully implemented. See Porting to Python 3.13 for guidance on upgrading from earlier versions of Python.
 
-Interpreter improvements:
+if __name__ == "__main__":
+    main()
 
-A greatly improved interactive interpreter and improved error messages.
 
-PEP 667: The locals() builtin now has defined semantics when mutating the returned mapping. Python debuggers and similar tools may now more reliably update local variables in optimized scopes even during concurrent code execution.
+req.txt
 
-PEP 703: CPython 3.13 has experimental support for running with the global interpreter lock disabled. See Free-threaded CPython for more details.
+# Core Dependencies
+pandas==2.1.4
+openpyxl==3.1.2
 
-PEP 744: A basic JIT compiler was added. It is currently disabled by default (though we may turn it on later). Performance improvements are modest – we expect to improve this over the next few releases.
+# Date/Time Parsing
+python-dateutil==2.8.2
 
-Color support in the new interactive interpreter, as well as in tracebacks and doctest output. This can be disabled through the PYTHON_COLORS and NO_COLOR environment variables.
+# Pattern Matching
+regex==2023.12.25
 
-Python data model improvements:
+# Configuration (Optional)
+PyYAML==6.0.1
 
-__static_attributes__ stores the names of attributes accessed through self.X in any function in a class body.
+# Progress Display
+tqdm==4.66.1
 
-__firstlineno__ records the first line number of a class definition.
 
-Significant improvements in the standard library:
+readme
 
-Add a new PythonFinalizationError exception, raised when an operation is blocked during finalization.
+# Log Scraper Project - WMA JobFailure Architecture
 
-The argparse module now supports deprecating command-line options, positional arguments, and subcommands.
+## Description
+Automated log scraping tool that extracts error logs from ZIP files and exports them to Excel format.
 
-The new functions base64.z85encode() and base64.z85decode() support encoding and decoding Z85 data.
+## Features
+- Extracts logs from ZIP files (supports .log, .txt, .out, .err files)
+- Parses timestamps and error messages
+- Exports structured data to Excel with formatting
+- No keyword filtering needed (all logs are failure logs)
 
-The copy module now has a copy.replace() function, with support for many builtin types and any class defining the __replace__() method.
+## Installation
 
-The new dbm.sqlite3 module is now the default dbm backend.
+1. Install dependencies:
 
-The os module has a suite of new functions for working with Linux’s timer notification file descriptors.
 
-The random module now has a command-line interface.
+gitignore
 
-Security improvements:
 
-ssl.create_default_context() sets ssl.VERIFY_X509_PARTIAL_CHAIN and ssl.VERIFY_X509_STRICT as default flags.
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
 
-C API improvements:
+# Virtual Environment
+venv/
+ENV/
+env/
 
-The Py_mod_gil slot is now used to indicate that an extension module supports running with the GIL disabled.
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
 
-The PyTime C API has been added, providing access to system clocks.
+# Data files
+data/input/*.zip
+data/output/*.xlsx
+*.log
 
-PyMutex is a new lightweight mutex that occupies a single byte.
+# OS
+.DS_Store
+Thumbs.db
 
-There is a new suite of functions for generating PEP 669 monitoring events in the C API.
+# Config (if sensitive)
+config.local.yaml
 
-New typing features:
 
-PEP 696: Type parameters (typing.TypeVar, typing.ParamSpec, and typing.TypeVarTuple) now support defaults.
+config.yaml
 
-PEP 702: The new warnings.deprecated() decorator adds support for marking deprecations in the type system and at runtime.
 
-PEP 705: typing.ReadOnly can be used to mark an item of a typing.TypedDict as read-only for type checkers.
 
-PEP 742: typing.TypeIs provides more intuitive type narrowing behavior, as an alternative to typing.TypeGuard.
+# Optional Configuration File
+# All settings have defaults in code - this file is optional
 
-Platform support:
+# Folders
+input_folder: "data/input"
+output_folder: "data/output"
 
-PEP 730: Apple’s iOS is now an officially supported platform, at tier 3.
+# Timestamp patterns (regex)
+timestamp_patterns:
+  - '\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}'
+  - '\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}'
+  - '\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2},\d{3}'
 
-PEP 738: Android is now an officially supported platform, at tier 3.
+# File extensions to process
+file_extensions:
+  - '.log'
+  - '.txt'
+  - '.out'
+  - '.err'
 
-wasm32-wasi is now supported as a tier 2 platform.
+# Error keywords (for identification)
+error_keywords:
+  - 'ERROR'
+  - 'EXCEPTION'
+  - 'FAILED'
+  - 'Exception'
+  - 'Error'
+  - 'FATAL'
 
-wasm32-emscripten is no longer an officially supported platform.
 
-Important removals:
+src initi
 
-PEP 594: The remaining 19 “dead batteries” (legacy stdlib modules) have been removed from the standard library: aifc, audioop, cgi, cgitb, chunk, crypt, imghdr, mailcap, msilib, nis, nntplib, ossaudiodev, pipes, sndhdr, spwd, sunau, telnetlib, uu and xdrlib.
 
-Remove the 2to3 tool and lib2to3 module (deprecated in Python 3.11).
+"""
+Log Scraper Project - Source Code Package
+"""
+__version__ = "1.0.0"
 
-Remove the tkinter.tix module (deprecated in Python 3.6).
 
-Remove the locale.resetlocale() function.
+src/extrac
 
-Remove the typing.io and typing.re namespaces.
+"""
+Extractors Module - ZIP and Log File Extraction
+"""
+from .zip_extractor import ZipExtractor
 
-Remove chained classmethod descriptors.
+__all__ = ['ZipExtractor']
+
+
+8. src/extractors/zip_extractor.py
+
+
+"""
+ZIP Extractor - Handles ZIP file extraction and log file reading
+"""
+import zipfile
+import tempfile
+import shutil
+from pathlib import Path
+from typing import List, Dict
+
+
+class ZipExtractor:
+    """Extracts ZIP files and reads log content"""
+    
+    def __init__(self, input_folder: str = "data/input"):
+        self.input_folder = Path(input_folder)
+        self.temp_dir = None
+        
+    def get_all_zip_files(self) -> List[Path]:
+        """Get all ZIP files from input folder"""
+        if not self.input_folder.exists():
+            print(f"Warning: Input folder {self.input_folder} does not exist")
+            return []
+        
+        zip_files = list(self.input_folder.glob("*.zip"))
+        print(f"Found {len(zip_files)} ZIP file(s)")
+        return zip_files
+    
+    def extract_and_read_logs(self, zip_path: Path) -> List[Dict]:
+        """Extract ZIP and read all log files"""
+        log_data = []
+        
+        try:
+            # Create temporary directory for extraction
+            self.temp_dir = tempfile.mkdtemp()
+            
+            print(f"  Extracting: {zip_path.name}")
+            
+            with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+                zip_ref.extractall(self.temp_dir)
+                
+                # Find all log files
+                log_files = self._find_log_files(Path(self.temp_dir))
+                print(f"    Found {len(log_files)} log file(s)")
+                
+                # Read each log file
+                for log_file in log_files:
+                    content = self._read_log_file(log_file)
+                    if content:
+                        log_data.append({
+                            'source_file': log_file.name,
+                            'content': content,
+                            'zip_source': zip_path.name
+                        })
+            
+            # Cleanup temp directory
+            self._cleanup_temp()
+            
+        except Exception as e:
+            print(f"    Error extracting {zip_path.name}: {e}")
+            self._cleanup_temp()
+        
+        return log_data
+    
+    def _find_log_files(self, directory: Path) -> List[Path]:
+        """Find all log files recursively"""
+        log_extensions = ['.log', '.txt', '.out', '.err']
+        log_files = []
+        
+        for ext in log_extensions:
+            log_files.extend(directory.rglob(f"*{ext}"))
+        
+        return log_files
+    
+    def _read_log_file(self, file_path: Path) -> str:
+        """Read log file content"""
+        try:
+            # Try UTF-8 first, then fallback to other encodings
+            try:
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    return f.read()
+            except UnicodeDecodeError:
+                with open(file_path, 'r', encoding='latin-1', errors='ignore') as f:
+                    return f.read()
+        except Exception as e:
+            print(f"      Error reading {file_path.name}: {e}")
+            return ""
+    
+    def _cleanup_temp(self):
+        """Clean up temporary directory"""
+        if self.temp_dir and Path(self.temp_dir).exists():
+            try:
+                shutil.rmtree(self.temp_dir)
+            except Exception as e:
+                print(f"      Warning: Could not clean up temp directory: {e}")
+
+
+
+9. src/parsers/__init__.py
+
+"""
+Parsers Module - Log Content Parsing
+"""
+from .log_parser import LogParser
+
+__all__ = ['LogParser']
+
+
+10. src/parsers/log_parser.py
+
+
+"""
+Log Parser - Extracts timestamps and error messages from log content
+"""
+import re
+from typing import List, Dict
+
+
+class LogParser:
+    """Parses log content to extract timestamps and error messages"""
+    
+    def __init__(self):
+        # Timestamp patterns
+        self.timestamp_patterns = [
+            r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}',
+            r'\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}',
+            r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2},\d{3}',
+            r'\d{2}/\d{2}/\d{4} \d{2}:\d{2}:\d{2}',
+        ]
+        
+        # Error patterns
+        self.error_patterns = [
+            r'ERROR',
+            r'EXCEPTION',
+            r'FAILED',
+            r'Exception',
+            r'Error',
+            r'FATAL',
+            r'\w+Exception',
+            r'\w+Error'
+        ]
+    
+    def parse_log_content(self, content: str, source_file: str) -> List[Dict]:
+        """Parse log content and extract error information"""
+        results = []
+        lines = content.split('\n')
+        
+        for i, line in enumerate(lines):
+            # Check if line contains error
+            if self._contains_error(line):
+                # Extract information
+                timestamp = self._extract_timestamp(line)
+                error_type = self._extract_error_type(line)
+                
+                # Get context (current line + next 2 lines for stack trace)
+                context_lines = [line.strip()]
+                for j in range(1, 3):
+                    if i + j < len(lines) and lines[i + j].strip():
+                        context_lines.append(lines[i + j].strip())
+                
+                results.append({
+                    'timestamp': timestamp,
+                    'source_file': source_file,
+                    'error_type': error_type,
+                    'error_message': line.strip(),
+                    'full_context': '\n'.join(context_lines)
+                })
+        
+        return results
+    
+    def _contains_error(self, line: str) -> bool:
+        """Check if line contains error pattern"""
+        for pattern in self.error_patterns:
+            if re.search(pattern, line, re.IGNORECASE):
+                return True
+        return False
+    
+    def _extract_timestamp(self, line: str) -> str:
+        """Extract timestamp from line"""
+        for pattern in self.timestamp_patterns:
+            match = re.search(pattern, line)
+            if match:
+                return match.group(0)
+        return "N/A"
+    
+    def _extract_error_type(self, line: str) -> str:
+        """Extract error type from line"""
+        # Try to find specific exception/error type
+        error_match = re.search(r'(\w+Exception|\w+Error|ERROR|EXCEPTION|FAILED|FATAL)', line)
+        if error_match:
+            return error_match.group(0)
+        return "UnknownError"
+
+
+11. src/processors/__init__.py
+
+
+"""
+Processors Module - Main Processing Logic
+"""
+from .log_processor import LogProcessor
+
+__all__ = ['LogProcessor']
+
+
+12. src/processors/log_processor.py
+
+
+"""
+Log Processor - Orchestrates extraction and parsing workflow
+"""
+from src.extractors.zip_extractor import ZipExtractor
+from src.parsers.log_parser import LogParser
+from src.utils.config_loader import load_config
+from typing import List, Dict
+from tqdm import tqdm
+
+
+class LogProcessor:
+    """Main processor that orchestrates the entire workflow"""
+    
+    def __init__(self):
+        self.config = load_config()
+        self.extractor = ZipExtractor(self.config['input_folder'])
+        self.parser = LogParser()
+        
+    def process_all_zips(self) -> List[Dict]:
+        """Process all ZIP files and return parsed results"""
+        all_results = []
+        
+        # Get all ZIP files
+        zip_files = self.extractor.get_all_zip_files()
+        
+        if not zip_files:
+            return all_results
+        
+        # Process each ZIP file
+        for zip_file in tqdm(zip_files, desc="Processing ZIP files"):
+            # Extract and read logs
+            log_data = self.extractor.extract_and_read_logs(zip_file)
+            
+            # Parse each log file
+            for log in log_data:
+                parsed_results = self.parser.parse_log_content(
+                    log['content'],
+                    log['source_file']
+                )
+                
+                # Add ZIP source to results
+                for result in parsed_results:
+                    result['zip_source'] = log['zip_source']
+                    all_results.append(result)
+        
+        return all_results
+
+
+13. src/exporters/__init__.py
+
+
+"""
+Exporters Module - Data Export Functionality
+"""
+from .excel_exporter import ExcelExporter
+
+__all__ = ['ExcelExporter']
+
+
+14. src/exporters/excel_exporter.py
+
+"""
+Excel Exporter - Exports parsed log data to Excel format
+"""
+import pandas as pd
+from pathlib import Path
+from datetime import datetime
+from typing import List, Dict
+
+
+class ExcelExporter:
+    """Exports log data to formatted Excel file"""
+    
+    def __init__(self, output_folder: str = "data/output"):
+        self.output_folder = Path(output_folder)
+        self.output_folder.mkdir(parents=True, exist_ok=True)
+    
+    def export(self, results: List[Dict]) -> Path:
+        """Export results to Excel file"""
+        if not results:
+            print("No results to export")
+            return None
+        
+        # Convert to DataFrame
+        df = pd.DataFrame(results)
+        
+        # Reorder columns
+        column_order = ['timestamp', 'source_file', 'error_type', 
+                       'error_message', 'full_context', 'zip_source']
+        df = df[column_order]
+        
+        # Rename columns for better readability
+        df.columns = ['Timestamp', 'Source File', 'Error Type', 
+                     'Error Message', 'Full Context', 'ZIP Source']
+        
+        # Generate output filename with timestamp
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        output_file = self.output_folder / f"log_errors_{timestamp}.xlsx"
+        
+        # Write to Excel with formatting
+        with pd.ExcelWriter(output_file, engine='openpyxl') as writer:
+            df.to_excel(writer, index=False, sheet_name='Error Logs')
+            
+            # Get worksheet
+            worksheet = writer.sheets['Error Logs']
+            
+            # Auto-adjust column widths
+            for idx, col in enumerate(df.columns):
+                max_length = max(
+                    df[col].astype(str).apply(len).max(),
+                    len(col)
+                )
+                # Set width (with some padding)
+                worksheet.column_dimensions[chr(65 + idx)].width = min(max_length + 2, 50)
+        
+        print(f"\n✓ Exported {len(df)} error entries to Excel")
+        
+        return output_file
+
+
+15. src/utils/__init__.py
+
+
+"""
+Utils Module - Utility Functions
+"""
+from .config_loader import load_config
+
+__all__ = ['load_config']
+
+
+16. src/utils/config_loader.py
+
+"""
+Config Loader - Loads configuration with hardcoded defaults
+"""
+import yaml
+from pathlib import Path
+from typing import Dict
+
+
+# HARDCODED DEFAULTS (works without config.yaml)
+DEFAULT_CONFIG = {
+    'input_folder': 'data/input',
+    'output_folder': 'data/output',
+    'timestamp_patterns': [
+        r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}',
+        r'\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}',
+        r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2},\d{3}'
+    ],
+    'error_keywords': ['ERROR', 'EXCEPTION', 'FAILED', 'Exception', 'Error', 'FATAL'],
+    'file_extensions': ['.log', '.txt', '.out', '.err']
+}
+
+
+def load_config() -> Dict:
+    """
+    Load configuration from config.yaml if exists, 
+    otherwise use hardcoded defaults
+    """
+    config_path = Path('config.yaml')
+    
+    # Try to load custom config
+    if config_path.exists():
+        try:
+            with open(config_path, 'r') as f:
+                custom_config = yaml.safe_load(f)
+                if custom_config:
+                    # Merge custom config with defaults
+                    return {**DEFAULT_CONFIG, **custom_config}
+        except Exception as e:
+            print(f"Warning: Could not load config.yaml: {e}")
+            print("Using default configuration")
+    
+    # Return defaults if no config file or error
+    return DEFAULT_CONFIG
+
+
+def ensure_folders_exist():
+    """Ensure data folders exist"""
+    Path("data/input").mkdir(parents=True, exist_ok=True)
+    Path("data/output").mkdir(parents=True, exist_ok=True)
